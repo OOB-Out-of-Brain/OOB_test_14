@@ -20,7 +20,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
 import yaml
 
-from data.ct_hemorrhage_dataset import build_ct_classifier_dataloaders, CT_CLASS_NAMES
+from data.combined_dataset import build_combined_dataloaders, CLASS_NAMES as CT_CLASS_NAMES
 from models.classifier import StrokeClassifier
 from training.metrics import accuracy, cls_report, conf_matrix
 
@@ -96,9 +96,11 @@ def main(args):
     print(f"설정: epochs={epochs}, batch={batch_size}, lr={lr}, img={image_size}\n")
 
     ct_path = cfg["data"]["ct_hemorrhage_path"]
-    print(f"데이터셋 로딩 (CT Hemorrhage): {ct_path}")
-    train_loader, val_loader, class_weights = build_ct_classifier_dataloaders(
-        data_root=ct_path, image_size=image_size, batch_size=batch_size
+    tk_cache = cfg["data"]["tekno21_cache"]
+    print(f"데이터셋 로딩 (CT Hemorrhage + tekno21)")
+    train_loader, val_loader, class_weights = build_combined_dataloaders(
+        ct_root=ct_path, tekno21_cache=tk_cache,
+        image_size=image_size, batch_size=batch_size,
     )
     print(f"학습: {len(train_loader.dataset)}개  검증: {len(val_loader.dataset)}개\n")
 
