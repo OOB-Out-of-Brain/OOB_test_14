@@ -1,106 +1,168 @@
-"""
-데이터셋 준비 스크립트.
+"""모든 데이터셋 다운로드/준비 통합 스크립트.
 
-  tekno21 : HuggingFace에서 자동 캐시 (학습 시 자동 다운로드)
-  AISD    : 수동 다운로드 안내 + 폴더 구조 검증
+준비하는 데이터셋:
+  1. tekno21         : HuggingFace 자동 다운로드
+  2. CT Hemorrhage   : PhysioNet에서 zip 직접 다운로드
+  3. BHSD            : HuggingFace (별도 스크립트 호출)
+  4. AISD (synthetic): 로컬 생성 (별도 스크립트)
 
 실행:
     python scripts/download_data.py
 """
 
-import sys
+import sys, os, zipfile, subprocess, urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import os
-import zipfile
-import shutil
+
+TEKNO21_CACHE   = Path("./data/raw/tekno21")
+CT_HEM_DIR      = Path("./data/raw/ct_hemorrhage")
+CT_HEM_UNPACKED = CT_HEM_DIR / "computed-tomography-images-for-intracranial-hemorrhage-detection-and-segmentation-1.0.0"
+CT_HEM_ZIP_URL  = "https://physionet.org/static/published-projects/ct-ich/computed-tomography-images-for-intracranial-hemorrhage-detection-and-segmentation-1.0.0.zip"
+
+AISD_DIR        = Path("./data/raw/aisd")
+
+BHSD_DIR        = Path("./data/raw/bhsd/label_192")
+BHSD_PROCESSED  = Path("./data/processed/bhsd")
 
 
-AISD_RAW = Path("./data/raw/aisd")
-TEKNO21_CACHE = Path("./data/raw/tekno21")
+def _progress(block_num, block_size, total_size):
+    downloaded = block_num * block_size
+    if total_size > 0:
+        pct = min(100, downloaded * 100 / total_size)
+        mb = downloaded / (1024 * 1024)
+        total_mb = total_size / (1024 * 1024)
+        sys.stdout.write(f"\r    {pct:5.1f}%  {mb:.1f}/{total_mb:.1f} MB")
+        sys.stdout.flush()
 
 
-def check_aisd():
-    images_dir = AISD_RAW / "images"
-    masks_dir = AISD_RAW / "masks"
-
-    print("\n── AISD 데이터셋 확인 ────────────────────────────────────────")
-    if images_dir.exists() and masks_dir.exists():
-        n_img = len(list(images_dir.glob("*.png")))
-        n_mask = len(list(masks_dir.glob("*.png")))
-        print(f"  이미지: {n_img}개  마스크: {n_mask}개")
-        if n_img > 0 and n_mask > 0:
-            print("  ✅ AISD 데이터셋 준비 완료")
-            return True
-    print("""
-  ❌ AISD 데이터셋이 없습니다. 아래 절차로 수동 다운로드하세요:
-
-  1. GitHub에서 요청:
-     https://github.com/GriffinLiang/AISD
-     → "Dataset Download" 링크 또는 이메일 요청
-
-  2. 다운로드 후 압축 해제:
-     AISD.zip → data/raw/aisd/
-
-  3. 폴더 구조 확인:
-     data/raw/aisd/
-       images/   ← CT PNG 파일들 (xxx.png)
-       masks/    ← 분할 마스크 PNG 파일들 (xxx.png)
-
-  4. 이 스크립트 다시 실행하여 확인
-""")
-    return False
-
-
-def check_tekno21():
-    print("\n── tekno21 데이터셋 확인 ────────────────────────────────────")
-    print("  HuggingFace에서 학습 시 자동 다운로드됩니다.")
-    print("  (BTX24/tekno21-brain-stroke-dataset-multi)")
+# ── 1. tekno21 ───────────────────────────────────────────────────────────────
+def check_tekno21() -> bool:
+    print("\n[1] tekno21 (HuggingFace)")
     try:
         from datasets import load_dataset
-        print("  캐시 확인 중...")
         ds = load_dataset(
             "BTX24/tekno21-brain-stroke-dataset-multi",
             split="train",
             cache_dir=str(TEKNO21_CACHE),
         )
-        print(f"  ✅ tekno21 전체: {len(ds)}개 (train/val은 학습 시 자동 분리)")
-        print(f"  피처: {list(ds.features.keys())}")
-        label_key = next(k for k in ["label", "labels", "category", "class"]
-                         if k in ds.features)
-        import numpy as np
-        labels = [int(ds[i][label_key]) for i in range(len(ds))]
-        counts = np.bincount(labels)
-        # tekno21 실제 라벨: 0=Kanama(출혈), 1=iskemi(허혈), 2=İnme Yok(정상)
-        tk_names = ["Kanama(출혈)", "iskemi(허혈)", "İnme Yok(정상)"]
-        for i, c in enumerate(counts):
-            name = tk_names[i] if i < len(tk_names) else f"label_{i}"
-            print(f"    {name}: {c}개")
+        print(f"  ✅ tekno21: {len(ds)}개 슬라이스")
         return True
     except Exception as e:
-        print(f"  ⚠️  다운로드 중 오류: {e}")
+        print(f"  ❌ 다운로드 실패: {e}")
         return False
 
 
+# ── 2. CT Hemorrhage (PhysioNet) ─────────────────────────────────────────────
+def check_ct_hemorrhage() -> bool:
+    print("\n[2] CT Hemorrhage (PhysioNet)")
+    csv_path = CT_HEM_UNPACKED / "hemorrhage_diagnosis.csv"
+    if csv_path.exists():
+        print(f"  ✅ 이미 있음: {CT_HEM_UNPACKED}")
+        return True
+
+    zip_path = CT_HEM_DIR / "ct_hemorrhage.zip"
+    CT_HEM_DIR.mkdir(parents=True, exist_ok=True)
+
+    if not zip_path.exists():
+        print(f"  다운로드 중 (약 1.2GB, 시간 걸림)...")
+        print(f"    URL: {CT_HEM_ZIP_URL}")
+        try:
+            urllib.request.urlretrieve(CT_HEM_ZIP_URL, zip_path, reporthook=_progress)
+            print()
+        except Exception as e:
+            print(f"\n  ❌ 다운로드 실패: {e}")
+            print(f"  수동 다운로드: https://physionet.org/content/ct-ich/1.0.0/")
+            return False
+
+    print("  압축 해제 중...")
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(CT_HEM_DIR)
+    print(f"  ✅ 완료: {CT_HEM_UNPACKED}")
+    return True
+
+
+# ── 3. AISD (synthetic) ──────────────────────────────────────────────────────
+def check_aisd() -> bool:
+    print("\n[3] AISD (synthetic)")
+    images_dir = AISD_DIR / "images"
+    masks_dir = AISD_DIR / "masks"
+    if images_dir.exists() and len(list(images_dir.glob("*.png"))) > 0:
+        print(f"  ✅ 이미 있음 ({len(list(images_dir.glob('*.png')))}개 이미지)")
+        return True
+
+    gen_script = Path(__file__).parent / "generate_synthetic_aisd.py"
+    if gen_script.exists():
+        print(f"  synthetic AISD 생성 중 (generate_synthetic_aisd.py)...")
+        try:
+            subprocess.run([sys.executable, str(gen_script)], check=True)
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"  ❌ 생성 실패: {e}")
+    print(f"""
+  ⚠️ 합성 AISD 생성 스크립트 실패 또는 없음.
+  실제 AISD는 https://github.com/GriffinLiang/AISD 에서 수동 요청.
+""")
+    return False
+
+
+# ── 4. BHSD ──────────────────────────────────────────────────────────────────
+def check_bhsd() -> bool:
+    print("\n[4] BHSD (HuggingFace)")
+    if BHSD_DIR.exists() and (BHSD_DIR / "images").exists():
+        n = len(list((BHSD_DIR / "images").glob("*.nii.gz")))
+        print(f"  ✅ 원본 이미 있음 ({n}개 볼륨)")
+    else:
+        print("  원본 다운로드 → scripts/download_bhsd.py 실행...")
+        script = Path(__file__).parent / "download_bhsd.py"
+        try:
+            subprocess.run([sys.executable, str(script)], check=True)
+        except subprocess.CalledProcessError as e:
+            print(f"  ❌ 실패: {e}")
+            return False
+
+    # 전처리된 PNG 슬라이스 확인
+    if BHSD_PROCESSED.exists() and (BHSD_PROCESSED / "index.csv").exists():
+        n_img = len(list((BHSD_PROCESSED / "images").glob("*.png")))
+        print(f"  ✅ 전처리 완료 ({n_img}개 슬라이스)")
+    else:
+        print("  2D 슬라이스 전처리 → scripts/preprocess_bhsd.py 실행...")
+        script = Path(__file__).parent / "preprocess_bhsd.py"
+        try:
+            subprocess.run([sys.executable, str(script)], check=True)
+        except subprocess.CalledProcessError as e:
+            print(f"  ❌ 전처리 실패: {e}")
+            return False
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 def main():
     print("=" * 60)
-    print("  뇌졸중 AI 프로젝트 데이터셋 준비")
+    print("  뇌졸중 AI 프로젝트 — 전체 데이터셋 준비")
     print("=" * 60)
 
-    ok_tekno = check_tekno21()
+    results = {
+        "tekno21":       check_tekno21(),
+        "CT_hemorrhage": check_ct_hemorrhage(),
+        "AISD":          check_aisd(),
+        "BHSD":          check_bhsd(),
+    }
 
-    ok_aisd = check_aisd()
+    print("\n" + "=" * 60)
+    print("  요약")
+    print("=" * 60)
+    for name, ok in results.items():
+        icon = "✅" if ok else "❌"
+        print(f"  {icon} {name}")
 
-    print("\n── 요약 ──────────────────────────────────────────────────────")
-    print(f"  tekno21 (분류): {'✅' if ok_tekno else '❌'}")
-    print(f"  AISD (분할)   : {'✅' if ok_aisd else '❌ 수동 다운로드 필요'}")
-
-    if ok_tekno:
-        print("\n분류 학습 가능:  python training/train_classifier.py")
-    if ok_aisd:
-        print("분할 학습 가능:  python training/train_segmentor.py")
+    if all(results.values()):
+        print("\n모든 데이터 준비 완료. 학습 시작:")
+        print("  python training/train_classifier.py")
+        print("  python training/train_segmentor.py")
+    else:
+        print("\n일부 데이터셋 실패. 위 안내 확인 후 재실행하세요.")
 
 
 if __name__ == "__main__":

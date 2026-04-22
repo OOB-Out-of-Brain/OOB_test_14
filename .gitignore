@@ -2,9 +2,14 @@ venv/
 __pycache__/
 *.pyc
 
-data/raw/tekno21/
-data/raw/bhsd/
+# 데이터: 모두 다운로드 스크립트로 받음 (용량 큼)
+data/raw/
 data/processed/
+
+# 학습 체크포인트: 학습 돌리면 생성됨 (용량 큼)
+checkpoints/*/*.pth
+checkpoints/*/*.npz
 
 .DS_Store
 .vscode/
+.claude/
