@@ -1,170 +1,219 @@
 # Brain Stroke AI — CT 출혈 분석 파이프라인
 
-뇌 CT 영상에서 **출혈 여부를 이진 분류(normal / hemorrhagic)** 하고, 출혈이 있으면 **병변 위치를 분할(segmentation)** 하는 end-to-end 파이프라인입니다.
+뇌 CT 영상에서 **출혈 여부(2-class)** 를 판독하고 병변 위치를 분할(segmentation)하는 end-to-end 파이프라인입니다.
 
 - **Classifier**: EfficientNet-B2 (2-class)
 - **Segmentor**: U-Net + ResNet34 encoder (binary mask)
 - **Device**: Apple Silicon MPS / NVIDIA CUDA / CPU 자동 감지
-- **라벨 전략**: 여러 다국적 데이터셋의 라벨을 `normal(0)` / `hemorrhagic(1)` 이진 체계로 통합
+- **Pipeline 규칙 (현재 버전)**: **1% threshold** — 병변 비율 ≤ 1% 면 normal로 판독
+  → normal 오탐은 적지만 작은 출혈을 놓칠 수 있음
+  → 대안(분류기 단독)은 다음 레포(OOB_test_7)에 있음
 
 ---
 
-## Quick Start
+## 1. Quick Start (5분 세팅)
 
 ```bash
-# 1. 레포 클론
-git clone https://github.com/OOB-Out-of-Brain/OOB_test_006.git
-cd OOB_test_006
+# 1. 클론
+git clone https://github.com/OOB-Out-of-Brain/OOB_test_6.git
+cd OOB_test_6
 
-# 2. 가상환경 + 패키지 설치
+# 2. 가상환경 + 패키지
 python3 -m venv venv
 source venv/bin/activate              # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
-# 3. 데이터 자동 다운로드 (약 3.3GB, 30분~1시간)
+# 3. 학습용 데이터 자동 다운로드 (~3.3GB, 30분~1시간)
 python scripts/download_data.py
 
-# 4. 학습 (분류기 + 분할기, 각각 따로 실행)
+# 4. 학습
 python training/train_classifier.py
 python training/train_segmentor.py
 
-# 5. 추론 (학습 끝난 후)
+# 5. 추론
 python demo.py --image path/to/ct.jpg
 ```
 
-Python 3.10+, PyTorch 2.0+ 필요. **상세 가이드는 [HOWTRAIN.md](HOWTRAIN.md) 참조**.
+---
+
+## 2. 데이터셋 가이드 — 뭘 받아야 하나
+
+### 2-1. 학습용 (필수) — `python scripts/download_data.py` 한 번이면 끝
+
+| 데이터셋 | 출처 | 용량 | 자동 여부 | 역할 |
+|---|---|---|---|---|
+| **tekno21** | HuggingFace `BTX24/tekno21-brain-stroke-dataset-multi` | ~560MB | ✅ 자동 | 분류 |
+| **CT Hemorrhage** | PhysioNet `ct-ich v1.0.0` zip | ~1.2GB | ✅ 자동 | 분류 + 분할 |
+| **AISD (synthetic)** | 로컬 생성 | ~110MB | ✅ 자동 | 분할 보조 |
+| **BHSD** | HuggingFace `WuBiao/BHSD` | ~1.4GB | ✅ 자동 | 분류 + 분할 |
+
+`download_data.py` 가 HuggingFace/PhysioNet에서 전부 가져온 뒤 BHSD 3D NIfTI를 brain window(center 40, width 80 HU)로 잘라 2D PNG로 변환.
+
+### 2-2. 외부 테스트셋 (선택) — 학습에 **절대** 쓰지 말 것
+
+| 데이터셋 | 출처 | 용량 | 자동 여부 | 용도 |
+|---|---|---|---|---|
+| **CQ500** | qure.ai | ~30GB | ❌ 이메일 등록 필요 | 외부 일반화 테스트 (FP/FN 리포트) |
+
+CQ500 받는 법:
+1. http://headctstudy.qure.ai/dataset → 이메일 등록
+2. 받은 이메일 링크들(Batch zip 여러 개) 전부 다운로드
+3. `data/raw/cq500/` 에 압축 해제 — 구조:
+   ```
+   data/raw/cq500/
+     CQ500CT1/Unknown Study/*.dcm
+     CQ500CT2/...
+     ...
+     reads.csv          (3명 방사선과의사 판독 라벨)
+   ```
+4. 평가: `python scripts/evaluate_cq500.py` → `results/cq500/` 에 metrics + FP/FN 샘플 생성
+
+⚠️ CQ500은 **훈련에 사용 금지** (라이선스 NC-ND, 외부 benchmark 용도).
 
 ---
 
-## 사용 데이터셋 (4개)
+## 3. 테스트 실행 방법 (4가지)
 
-| 데이터셋 | 출처 | 용량 | 역할 |
-|---|---|---|---|
-| **tekno21** | HuggingFace `BTX24/tekno21-brain-stroke-dataset-multi` | ~560MB | 분류 (normal/hemorrhagic) |
-| **CT Hemorrhage** | PhysioNet `ct-ich v1.0.0` | ~1.2GB | 분류 + 분할 마스크 |
-| **AISD (synthetic)** | 로컬 생성 | ~110MB | 분할 보조 |
-| **BHSD** | HuggingFace `WuBiao/BHSD` | ~1.4GB | 분류 + 분할 (출혈 subtype 5종 → binary 통합) |
+### 3-1. 단일 이미지 추론 (가장 간단)
 
-모든 데이터는 `python scripts/download_data.py` 한 번에 받아지고, BHSD의 3D NIfTI는 brain window(`center=40, width=80 HU`) 적용 후 2D 슬라이스로 자동 변환됩니다.
+```bash
+python demo.py --image path/to/ct.jpg
+# 결과: results/{파일명}_result.png
+```
 
-**라벨 매핑:**
-- tekno21 `İnme Yok` → normal, `Kanama` → hemorrhagic, `iskemi` → 제외
-- CT Hemorrhage `No_Hemorrhage=1` → normal, 나머지 → hemorrhagic
-- BHSD 라벨 `1~5` (EDH/IPH/IVH/SAH/SDH) → 전부 hemorrhagic (subtype 정보는 버림)
-- Normal 샘플은 BHSD에 없으므로 기존 데이터셋에서만 사용
+### 3-2. 폴더 배치 테스트 (대량)
+
+폴더 안의 모든 CT 이미지 자동 분류:
+
+```bash
+python scripts/run_batch_test.py \
+    --input-dir /path/to/images \
+    --output-dir results/my_test/
+```
+
+**출력**:
+- 각 이미지의 `{이름}_result.png` (원본 | 오버레이)
+- 터미널에 파일별 결과 요약 (`normal/hemorrhagic`, 신뢰도, 병변 크기)
+
+**자동 hint**: `--input-dir` 에 normal/hemorrhagic 섞여 있어도 상관없음. 라벨 없이도 분류만 수행.
+
+### 3-3. Val set 상세 평가 (2089장)
+
+학습에 쓰지 않은 검증셋 전체에서 **sensitivity/specificity/FP/FN** 측정:
+
+```bash
+python scripts/evaluate_valset.py
+# 출력: results/valset/metrics.txt + summary.csv + FP/FN 샘플 이미지
+```
+
+### 3-4. Pipeline 규칙 3종 비교
+
+현재 1% threshold 규칙 vs 분류기 단독 vs 이전 세그-any 규칙 중 어느 게 최적인지 비교:
+
+```bash
+python scripts/evaluate_valset_compare.py
+# 출력: results/valset/rule_comparison.txt
+```
+
+### 3-5. 외부 CQ500 테스트 (데이터 수동 다운로드 후)
+
+```bash
+python scripts/evaluate_cq500.py
+# 출력: results/cq500/metrics.txt + false_positives/ + false_negatives/
+```
 
 ---
 
-## 주요 폴더
+## 4. Pipeline 판독 규칙 (현재: 1% threshold)
 
 ```
-OOB_test_5/
-├─ HOWTRAIN.md                 # 상세 학습/실행 가이드
-├─ README.md                   # 이 문서
-├─ config.yaml                 # 하이퍼파라미터 + 데이터 경로
-├─ demo.py                     # 추론 데모
+[이미지] → [분류기(EfficientNet-B2)] → normal/hemorrhagic 확률
+         → [세그멘터(U-Net)] → 병변 픽셀 마스크
+
+최종 판독:
+  병변 비율 ≤ 1%        → normal   (미세 오탐 무시)
+  병변 비율 >  1%
+      & 분류기 normal   → hemorrhagic (세그가 보완)
+      & 분류기 출혈     → hemorrhagic (그대로)
+```
+
+**성능 (val set 2089장 기준)**:
+
+| 지표 | 값 |
+|---|---|
+| Accuracy | 72.00% |
+| Sensitivity (출혈 탐지) | 28.02% ⚠️ |
+| Specificity (정상 식별) | 98.09% |
+| FP (오탐) | 25 |
+| FN (누락) | 560 |
+
+⚠️ 1% 규칙은 **큰 출혈 케이스(brain_test 12장)에선 100% 정확**했지만, 실제 분포(작은 출혈 포함)에선 출혈의 72%를 놓침. 스크리닝용(specificity ↑) 로만 적합.
+
+**분류기 단독 규칙은 Acc 96.03%, Sens 93.32% 로 훨씬 균형 잡힘 → `OOB_test_7` 에 구현**.
+
+---
+
+## 5. 폴더 구조
+
+```
+OOB_test_6/
+├─ README.md              # 이 문서
+├─ HOWTRAIN.md            # 학습 상세 가이드
+├─ config.yaml            # 하이퍼파라미터
+├─ demo.py                # 단일 이미지 추론 데모
 │
 ├─ data/
-│  ├─ combined_dataset.py      # 분류기 통합 로더 (CT+tekno21+BHSD)
-│  ├─ ct_hemorrhage_dataset.py # 분할기 통합 로더 (CT+BHSD 마스크)
-│  └─ raw/, processed/         # 데이터 (gitignore, 스크립트로 다운로드)
+│  ├─ combined_dataset.py      # 분류기 로더 (CT+tekno21+BHSD)
+│  ├─ ct_hemorrhage_dataset.py # 분할기 로더 (CT+BHSD 마스크)
+│  └─ raw/, processed/         # .gitignore (download_data.py 로 받음)
 │
-├─ models/
-│  ├─ classifier.py            # EfficientNet-B2 wrapper
-│  └─ segmentor.py             # U-Net (smp)
-│
-├─ training/
-│  ├─ train_classifier.py
-│  ├─ train_segmentor.py
-│  └─ metrics.py               # Dice, IoU, DiceBCE loss
-│
-├─ inference/
-│  ├─ pipeline.py              # StrokePipeline (cls → seg → overlay)
-│  └─ visualization.py
+├─ models/{classifier,segmentor}.py
+├─ training/{train_classifier,train_segmentor,metrics}.py
+├─ inference/{pipeline,visualization}.py    # 1% 규칙 적용 pipeline
 │
 ├─ scripts/
-│  ├─ download_data.py         # 전체 데이터 통합 다운로드 (메인)
-│  ├─ download_bhsd.py         # BHSD만 개별 다운로드
-│  ├─ preprocess_bhsd.py       # NIfTI → 2D PNG 변환
+│  ├─ download_data.py         # 🔹 학습용 4개 데이터셋 통합 다운로드
+│  ├─ download_bhsd.py         # BHSD 개별
+│  ├─ download_cq500.py        # 🔹 CQ500 다운로드 시도 (이메일 안내)
+│  ├─ preprocess_bhsd.py       # NIfTI → 2D
 │  ├─ generate_synthetic_aisd.py
-│  └─ validate.py              # 학습 후 리포트
+│  ├─ run_batch_test.py        # 🔹 폴더 배치 테스트
+│  ├─ evaluate_valset.py       # 🔹 val set 상세 평가
+│  ├─ evaluate_valset_compare.py # 🔹 규칙 비교
+│  └─ evaluate_cq500.py        # 🔹 외부 CQ500 평가
 │
-├─ checkpoints/                # 학습 결과 (gitignore)
-├─ results/                    # 추론 결과
-└─ archive/                    # 이전 실험 결과 보관
+├─ checkpoints/           # 학습 결과 (gitignore)
+└─ results/               # 추론 결과
 ```
 
 ---
 
-## 예상 소요 시간 (MacBook Apple Silicon 기준)
+## 6. 예상 소요 시간 (MacBook M 시리즈 기준)
 
-| 단계 | 시간 |
+| 작업 | 시간 |
 |---|---|
-| 데이터 다운로드 + 전처리 | 30분~1시간 |
-| 분류기 학습 (50 epoch) | ~1.5~2시간 |
-| 분할기 학습 (early stopping) | ~20~40분 |
-| 추론 1장 | 1~2초 |
+| `download_data.py` (학습용 3.3GB) | 30분~1시간 |
+| `train_classifier.py` (50 epoch) | ~1.5~2시간 |
+| `train_segmentor.py` (early stop) | ~20~40분 |
+| 단일 추론 | 1~2초 |
+| Val set 전체 평가 (2089장) | ~10분 |
+| CQ500 491 스캔 평가 | ~30분~1시간 |
 
-NVIDIA GPU(CUDA)에서는 훨씬 빠릅니다.
-
----
-
-## 테스트 / 추론 사용법
-
-### 단일 이미지 추론
-
-```bash
-python demo.py --image path/to/ct.jpg
-# 결과: results/{파일명}_result.png 에 저장됨
-
-python demo.py --image input.jpg --output my_result.png
-```
-
-출력: `원본 | 결과 이미지(출혈 위치 오버레이) + 분류 확률 차트`
-
-### 폴더 배치 테스트
-
-폴더 안의 모든 이미지 자동 추론:
-
-```bash
-python scripts/run_batch_test.py --input-dir path/to/folder --output-dir results/
-```
-
-### 판독 로직 (pipeline)
-
-1. 분류기가 normal/hemorrhagic 확률 출력
-2. 분할기가 병변 마스크 생성
-3. **최종 판독 규칙**:
-   - 병변 비율 **≤ 1%** → `normal` (미세 오탐 무시)
-   - 병변 비율 **> 1%** & 분류기 normal → `hemorrhagic` 으로 override (분류기 놓친 경우 세그가 보완)
-   - 나머지 → 분류기 결과 유지
-
-이 규칙은 [`inference/pipeline.py`](inference/pipeline.py) 에서 조정 가능.
+NVIDIA GPU는 훨씬 빠름.
 
 ---
 
-## 검증 리포트
+## 7. 트러블슈팅
 
-학습 완료 후 precision/recall/F1 + Dice/IoU:
-
-```bash
-python scripts/validate.py
-```
-
----
-
-## 트러블슈팅
-
-- **PhysioNet zip 다운로드 실패** → 브라우저로 https://physionet.org/content/ct-ich/1.0.0/ 수동 다운로드 후 `data/raw/ct_hemorrhage/` 에 압축 해제
-- **GPU OOM** → `config.yaml` 에서 `batch_size` 반으로 감소
-- **MPS 디바이스 미지원** → 자동으로 CPU로 동작, 다만 느려짐
-- 더 자세한 내용은 [HOWTRAIN.md](HOWTRAIN.md) 섹션 7 참조
+- **PhysioNet zip 실패** → 브라우저로 https://physionet.org/content/ct-ich/1.0.0/ 수동, `data/raw/ct_hemorrhage/` 에 풀기
+- **BHSD 느림** → `huggingface-cli login` 으로 인증
+- **CQ500 자동 다운로드 실패** → 이메일 등록 방식이라 **정상** (수동 필요)
+- **GPU OOM** → `config.yaml` 의 `batch_size` 절반 감소
+- **MPS 미지원** → 자동 CPU, 느리지만 동작
 
 ---
 
-## 라이선스 / 데이터 사용
+## 8. 다음 버전
 
-각 데이터셋의 원래 라이선스를 따르세요:
-- BHSD: **NC-ND (비상업적 사용만)**
-- PhysioNet CT-ICH: 연구 목적 OK, 재배포 제한
-- tekno21: TEKNOFEST 2021 공개 데이터
+- **`OOB_test_7`** : 분류기 단독 규칙 (Acc 96%, FN 52 → 추천)
+- 향후 계획: 세그멘터 recall 개선 (Dice 0.56 → 0.7+), CQ500 실측 반영
