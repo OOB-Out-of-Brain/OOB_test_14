@@ -31,9 +31,17 @@ DIM = f"{CSI}2m"
 BOLD = f"{CSI}1m"
 RESET = f"{CSI}0m"
 
-EPOCH_RE = re.compile(
+# Classifier: Epoch X/Y | Train loss=A acc=B | Val loss=C acc=D
+EPOCH_CLS_RE = re.compile(
     r"Epoch\s+(\d+)/(\d+)\s*\|\s*Train loss=([\d.]+)\s+acc=([\d.]+)"
     r"\s*\|\s*Val loss=([\d.]+)\s+acc=([\d.]+)"
+)
+# Segmentor: Epoch X/Y | train loss=A  background=..  ischemic=..  hemorrhagic=.. |
+#            val loss=B  background=..  ischemic=..  hemorrhagic=.. | lesion_dice=C
+EPOCH_SEG_RE = re.compile(
+    r"Epoch\s+(\d+)/(\d+)\s*\|\s*train loss=([\d.]+)"
+    r".*?ischemic=([\d.]+)\s+hemorrhagic=([\d.]+)\s*\|\s*val loss=([\d.]+)"
+    r".*?ischemic=([\d.]+)\s+hemorrhagic=([\d.]+).*?lesion_dice=([\d.]+)"
 )
 TQDM_RE = re.compile(
     r"(train:|eval :)\s+(\d+)%\|[^|]*\|\s+(\d+)/(\d+).*?\[([^\]]+)\]"
@@ -62,25 +70,51 @@ def handle(seg: str, state: dict, show_bar: bool):
     if not s:
         return
 
-    m_ep = EPOCH_RE.search(s)
-    if m_ep:
-        ep = int(m_ep.group(1)); tot = int(m_ep.group(2))
-        tl = float(m_ep.group(3)); ta = float(m_ep.group(4))
-        vl = float(m_ep.group(5)); va = float(m_ep.group(6))
-        now = time.time()
-        elapsed = now - state["start"]
+    # Classifier epoch 라인
+    m_cls = EPOCH_CLS_RE.search(s)
+    if m_cls:
+        state["mode"] = "cls"
+        ep = int(m_cls.group(1)); tot = int(m_cls.group(2))
+        tl = float(m_cls.group(3)); ta = float(m_cls.group(4))
+        vl = float(m_cls.group(5)); va = float(m_cls.group(6))
+        elapsed = time.time() - state["start"]
         state["completed"].append((ep, tot, va))
-
         best_ep, best_va = max(state["completed"], key=lambda c: c[2])[::2]
         per_ep = elapsed / len(state["completed"])
         eta = per_ep * max(0, tot - ep)
         color = GREEN if va >= best_va else CYAN
-
         sys.stdout.write(CLEAR)
         print(f"{color}Ep {ep:>3}/{tot}{RESET}  "
               f"train loss={tl:.4f} acc={ta:.4f}  |  "
               f"{BOLD}val acc={va:.4f}{RESET} (loss={vl:.4f})  "
               f"best={best_va:.4f}(ep{best_ep})  "
+              f"elapsed={human(elapsed)}  ETA={human(eta)}")
+        sys.stdout.flush()
+        state["last"] = ""
+        return
+
+    # Segmentor epoch 라인
+    m_seg = EPOCH_SEG_RE.search(s)
+    if m_seg:
+        state["mode"] = "seg"
+        ep = int(m_seg.group(1)); tot = int(m_seg.group(2))
+        tl = float(m_seg.group(3))
+        t_isc = float(m_seg.group(4)); t_hem = float(m_seg.group(5))
+        vl = float(m_seg.group(6))
+        v_isc = float(m_seg.group(7)); v_hem = float(m_seg.group(8))
+        dice = float(m_seg.group(9))  # lesion_mean (best 판정 기준)
+        elapsed = time.time() - state["start"]
+        state["completed"].append((ep, tot, dice))
+        best_ep, best_d = max(state["completed"], key=lambda c: c[2])[::2]
+        per_ep = elapsed / len(state["completed"])
+        eta = per_ep * max(0, tot - ep)
+        color = GREEN if dice >= best_d else CYAN
+        sys.stdout.write(CLEAR)
+        print(f"{color}Ep {ep:>3}/{tot}{RESET}  "
+              f"train loss={tl:.4f} (isc={t_isc:.3f} hem={t_hem:.3f})  |  "
+              f"val loss={vl:.4f} (isc={v_isc:.3f} hem={v_hem:.3f})  |  "
+              f"{BOLD}lesion_dice={dice:.4f}{RESET}  "
+              f"best={best_d:.4f}(ep{best_ep})  "
               f"elapsed={human(elapsed)}  ETA={human(eta)}")
         sys.stdout.flush()
         state["last"] = ""
@@ -123,20 +157,28 @@ def handle(seg: str, state: dict, show_bar: bool):
 
 def seed_state_from_log(log_path: Path, state: dict):
     """이미 진행된 epoch 라인을 로그에서 읽어 state["completed"]에 반영.
-    세션 중간에 watcher를 붙여도 올바른 ep 번호/ETA 표시되게 함."""
+    세션 중간에 watcher를 붙여도 올바른 ep 번호/best 추적 표시되게 함.
+    state["mode"]를 'cls' / 'seg' 로 설정."""
     try:
         with open(log_path, "rb") as f:
             data = f.read()
     except Exception:
         return
     text = data.decode("utf-8", errors="ignore")
-    # \r 도 개행으로 취급
     for line in re.split(r"[\r\n]+", text):
-        m = EPOCH_RE.search(line)
+        m = EPOCH_CLS_RE.search(line)
         if m:
             ep = int(m.group(1)); tot = int(m.group(2))
             va = float(m.group(6))
             state["completed"].append((ep, tot, va))
+            state["mode"] = "cls"
+            continue
+        m = EPOCH_SEG_RE.search(line)
+        if m:
+            ep = int(m.group(1)); tot = int(m.group(2))
+            dice = float(m.group(9))  # lesion_dice
+            state["completed"].append((ep, tot, dice))
+            state["mode"] = "seg"
 
 
 def run(log_path: Path, show_bar: bool):
@@ -144,14 +186,15 @@ def run(log_path: Path, show_bar: bool):
     print(f"{BOLD}start   {RESET}  {time.strftime('%Y-%m-%d %H:%M:%S')}")
     print("-" * 78)
 
-    state = {"start": time.time(), "completed": [], "last": ""}
+    state = {"start": time.time(), "completed": [], "last": "", "mode": None}
     seed_state_from_log(log_path, state)
     if state["completed"]:
         last_ep, last_tot, _ = state["completed"][-1]
-        best_ep, best_va = max(state["completed"], key=lambda c: c[2])[::2]
-        print(f"  {DIM}기존 완료 {len(state['completed'])} epoch — "
+        best_ep, best_val = max(state["completed"], key=lambda c: c[2])[::2]
+        metric = "lesion_dice" if state["mode"] == "seg" else "val acc"
+        print(f"  {DIM}[{state['mode']}] 기존 완료 {len(state['completed'])} epoch — "
               f"현재 ep{last_ep + 1}/{last_tot} 진행 중, "
-              f"best val acc={best_va:.4f}(ep{best_ep}){RESET}")
+              f"best {metric}={best_val:.4f}(ep{best_ep}){RESET}")
 
     # `tail -f -n 0`로 마지막 지점부터 새 바이트만 받음.
     # stdout을 binary로 받아 \r 세그먼트 단위로 쪼갬 (tqdm은 \r 로만 구분됨).
