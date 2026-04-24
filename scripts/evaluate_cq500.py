@@ -24,6 +24,7 @@ import pydicom
 
 from inference.pipeline import StrokePipeline
 from inference.visualization import _build_figure
+from scripts._eval_common import classify_bucket, save_3panel, ensure_bucket_dirs
 
 
 CQ500_DIR = Path("./data/raw/cq500")
@@ -195,10 +196,8 @@ def main():
     scan_dirs.sort()
     print(f"스캔 폴더: {len(scan_dirs)}개 (재귀 수집)")
 
-    # 모든 스캔을 예측 클래스별로 저장
-    pred_root = OUT_DIR / "predicted"
-    for c in ["normal", "ischemic", "hemorrhagic"]:
-        (pred_root / c).mkdir(parents=True, exist_ok=True)
+    # 버킷 폴더 미리 생성 (CQ500 은 ischemic GT 없음 → correct/ischemic 만들지 않음)
+    ensure_bucket_dirs(OUT_DIR, include_ischemic_correct=False)
 
     summary_csv = OUT_DIR / "summary.csv"
     with open(summary_csv, "w", newline="") as f:
@@ -208,8 +207,6 @@ def main():
 
         y_true, y_pred = [], []
         per_class_pred = {"normal": 0, "ischemic": 0, "hemorrhagic": 0}
-        fp_dir = OUT_DIR / "false_positives"
-        fp_count = 0
         unmatched = 0
 
         for i, scan_dir in enumerate(scan_dirs, 1):
@@ -231,28 +228,24 @@ def main():
                         f"{r['max_hem_pct']:.2f}", f"{r['max_isch_pct']:.2f}",
                         r["n_slices"]])
 
-            # 모든 스캔에 대해 대표 슬라이스 3-panel figure 저장
+            # GT 변환: CQ500 은 hemorrhagic / non-hemorrhagic 이진 → normal(non-hem) / hemorrhagic
+            gt_name = "hemorrhagic" if gt_hem == 1 else "normal"
+            bucket = classify_bucket(gt_name, pred_cls, has_ischemic_gt=False)
+
+            # 대표 슬라이스 3-panel figure 저장
             pair = r.get("best_pair")
             if pair is not None:
                 rgb, res = pair
-                mark = "OK" if (gt_hem == pred_hem) else "XX"
-                gt_tag = "hem" if gt_hem == 1 else "nonhem"
-                save_scan_panel(
+                save_3panel(
                     rgb, res,
-                    pred_root / pred_cls / f"{mark}_gt-{gt_tag}_{name}.png",
-                    gt_tag,
+                    OUT_DIR / bucket / f"{name}.png",
+                    gt_name, dpi=100,
                 )
-
-            # FP 샘플은 별도 폴더에도 중복 저장 (상한)
-            if gt_hem == 0 and pred_hem == 1 and fp_count < 20:
-                if pair is not None:
-                    rgb, res = pair
-                    save_scan_panel(
-                        rgb, res,
-                        fp_dir / f"{name}.png",
-                        "nonhem",
-                    )
-                fp_count += 1
+            else:
+                # 슬라이스 전부 처리 실패 — 빈 placeholder 라도 남겨서 누락 표시
+                placeholder = OUT_DIR / bucket / f"{name}_NO_DICOM.txt"
+                placeholder.parent.mkdir(parents=True, exist_ok=True)
+                placeholder.write_text(f"scan={name}\npred_cls={pred_cls}\ngt_hem={gt_hem}\n")
 
             if i % 10 == 0:
                 print(f"  {i}/{len(scan_dirs)} 처리됨...")

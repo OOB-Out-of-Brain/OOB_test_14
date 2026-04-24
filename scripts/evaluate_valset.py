@@ -22,10 +22,10 @@ import matplotlib.pyplot as plt
 from data.combined_dataset import build_combined_dataloaders, CLASS_NAMES
 from inference.pipeline import StrokePipeline
 from inference.visualization import _build_figure
+from scripts._eval_common import classify_bucket, save_3panel, ensure_bucket_dirs
 
 
 OUT_DIR = Path("./results/valset_3class")
-MAX_ERRORS_PER_BUCKET = 20  # 오분류 버킷당 최대 저장 샘플 수 (errors/ 폴더에 중복 저장용)
 
 
 def save_dual_panel(orig_np, result, out_path: Path, gt_name: str, dpi: int = 100):
@@ -43,12 +43,8 @@ def save_dual_panel(orig_np, result, out_path: Path, gt_name: str, dpi: int = 10
 
 def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    err_root = OUT_DIR / "errors"
-    err_root.mkdir(exist_ok=True)
-    # 모든 예측 결과를 pred 클래스별 폴더에 저장 (correct/wrong 표시 포함)
-    pred_root = OUT_DIR / "predicted"
-    for c in CLASS_NAMES:
-        (pred_root / c).mkdir(parents=True, exist_ok=True)
+    # 버킷 폴더 미리 생성 (val set 은 ischemic GT 있으니 correct/ischemic 포함)
+    ensure_bucket_dirs(OUT_DIR, include_ischemic_correct=True)
 
     print("Val set 로딩 (3-class)...")
     _, val_loader, _ = build_combined_dataloaders(
@@ -68,7 +64,6 @@ def main():
 
     n_classes = len(CLASS_NAMES)
     cm = np.zeros((n_classes, n_classes), dtype=np.int64)
-    err_counts = {}  # (gt, pred) → saved count
     summary_rows = []
 
     hf = val_ds.hf
@@ -99,27 +94,13 @@ def main():
             f"{r.hemorrhagic_area_pct:.2f}",
         ])
 
-        # 모든 샘플을 pred 폴더에 저장 (dual-panel: 원본 + 확률바 + overlay)
-        pred_dir = pred_root / CLASS_NAMES[pred]
-        mark = "OK" if gt == pred else "XX"
-        save_dual_panel(
+        # 버킷(정상/출혈/허혈/오탐/오류/혼동)별 폴더 배치. tekno21 val 은 ischemic GT 있음.
+        bucket = classify_bucket(CLASS_NAMES[gt], CLASS_NAMES[pred], has_ischemic_gt=True)
+        save_3panel(
             img, r,
-            pred_dir / f"{mark}_gt-{CLASS_NAMES[gt]}_{source}_{i:05d}_{Path(name).stem}.png",
-            CLASS_NAMES[gt],
+            OUT_DIR / bucket / f"{source}_{i:05d}_{Path(name).stem}.png",
+            CLASS_NAMES[gt], dpi=100,
         )
-
-        # 오분류 샘플은 errors/ 폴더에도 버킷별로 중복 저장 (상한 있음)
-        if gt != pred:
-            bucket_key = (gt, pred)
-            n_saved = err_counts.get(bucket_key, 0)
-            if n_saved < MAX_ERRORS_PER_BUCKET:
-                bucket_dir = err_root / f"gt_{CLASS_NAMES[gt]}_pred_{CLASS_NAMES[pred]}"
-                save_dual_panel(
-                    img, r,
-                    bucket_dir / f"{n_saved:03d}_{source}_{Path(name).stem}.png",
-                    CLASS_NAMES[gt],
-                )
-                err_counts[bucket_key] = n_saved + 1
 
         if (i + 1) % 200 == 0:
             acc_so_far = np.trace(cm) / max(cm.sum(), 1)
@@ -169,8 +150,11 @@ Per-class metrics
 
 Overall Accuracy : {acc:.4f}
 
-오분류 샘플 저장 경로:
-  {err_root} (버킷별 최대 {MAX_ERRORS_PER_BUCKET}개)
+결과 버킷 저장 경로:
+  {OUT_DIR}/correct/{{normal,ischemic,hemorrhagic}}/   (정답)
+  {OUT_DIR}/wrong/false_positive/                       (정상→병변 오탐)
+  {OUT_DIR}/wrong/missed/                               (병변→정상 놓침)
+  {OUT_DIR}/wrong/lesion_confusion/                     (출혈↔허혈 혼동)
 """
     print("\n" + report)
     (OUT_DIR / "metrics.txt").write_text(report)

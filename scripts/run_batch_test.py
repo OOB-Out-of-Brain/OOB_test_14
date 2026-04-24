@@ -22,6 +22,7 @@ from PIL import Image
 import matplotlib.pyplot as plt
 
 from inference.pipeline import StrokePipeline
+from scripts._eval_common import classify_bucket, save_3panel, ensure_bucket_dirs
 
 
 def infer_gt_from_name(name: str):
@@ -35,10 +36,43 @@ def infer_gt_from_name(name: str):
     return None
 
 
+def _collect_images(in_dir: Path, gt_from_folder: bool):
+    """이미지 경로 + (선택) GT 튜플 리스트.
+    gt_from_folder=True 이면 직속 부모 폴더명을 GT로 사용:
+      - hemorrhagic / hemorrhage → hemorrhagic
+      - ischaemic / ischemic / iskemi / isch* → ischemic
+      - normal / nomal → normal
+    """
+    exts = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
+    pairs = []
+    if gt_from_folder:
+        for p in sorted(in_dir.rglob("*")):
+            if p.suffix.lower() not in exts or p.name.startswith("result_"):
+                continue
+            folder = p.parent.name.lower()
+            if re.search(r"hemorr|bleed", folder):
+                gt = "hemorrhagic"
+            elif re.search(r"iscch|ischa|ischem|iskemi|isch$", folder) or "ischa" in folder or "iskemi" in folder:
+                gt = "ischemic"
+            elif re.search(r"normal|nomal", folder):
+                gt = "normal"
+            else:
+                gt = None
+            pairs.append((p, gt))
+    else:
+        for p in sorted(in_dir.iterdir()):
+            if p.suffix.lower() not in exts or p.name.startswith("result_"):
+                continue
+            pairs.append((p, None))
+    return pairs
+
+
 def main(args):
     in_dir = Path(args.input_dir)
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    # 버킷 폴더 미리 생성 (허혈 GT 있는지 여부에 따라 correct/ischemic 포함)
+    ensure_bucket_dirs(out_dir, include_ischemic_correct=args.gt_from_folder)
 
     print("모델 로딩...")
     pipe = StrokePipeline(
@@ -48,11 +82,9 @@ def main(args):
     if pipe.segmentor is None:
         print(f"  (세그멘터 ckpt 없음 → 분류만 진행)")
 
-    images = sorted([
-        p for p in in_dir.iterdir()
-        if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp", ".bmp")
-        and not p.name.startswith("result_")
-    ])
+    pairs = _collect_images(in_dir, gt_from_folder=args.gt_from_folder)
+    images = [p for p, _ in pairs]
+    folder_gt = {p: g for p, g in pairs}
     if not images:
         print(f"이미지 없음: {in_dir}")
         return
@@ -80,32 +112,27 @@ def main(args):
         if r.hemorrhagic_area_px:
             lesion_str += f"hem={r.hemorrhagic_area_px}px"
 
-        gt = None
-        prefix = ""
-        if not args.no_gt_from_name:
+        # GT 소스: 폴더명(우선) → 파일명
+        gt = folder_gt.get(img_path) if args.gt_from_folder else None
+        if gt is None and not args.no_gt_from_name:
             gt = infer_gt_from_name(img_path.stem)
-            prefix = f"{(gt or '-'):<12} "
-            if gt is not None:
-                cm[(gt, r.class_name)] = cm.get((gt, r.class_name), 0) + 1
+        prefix = f"{(gt or '-'):<12} " if (args.gt_from_folder or not args.no_gt_from_name) else ""
+        if gt is not None:
+            cm[(gt, r.class_name)] = cm.get((gt, r.class_name), 0) + 1
 
-        print(f"{prefix}{img_path.name:<24} {r.class_name:<12} "
+        print(f"{prefix}{img_path.name:<30} {r.class_name:<12} "
               f"{r.confidence:>6.1%}  {probs_str:<24} {lesion_str}")
 
-        # 시각화 저장
-        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        # 3-panel figure 저장 + 버킷별 폴더
         orig = np.array(Image.open(img_path).convert("RGB"))
-        axes[0].imshow(orig); axes[0].set_title("Original"); axes[0].axis("off")
-        axes[1].imshow(r.overlay_image if r.overlay_image is not None else orig)
-        color = {"normal": "green", "ischemic": "blue", "hemorrhagic": "red"}.get(r.class_name, "black")
-        title = f"{r.class_name.upper()} ({r.confidence:.1%})"
         if gt is not None:
-            tag = "✓" if gt == r.class_name else "✗"
-            title = f"GT={gt} | {title} {tag}"
-        axes[1].set_title(title, color=color)
-        axes[1].axis("off")
-        plt.tight_layout()
-        plt.savefig(out_dir / f"{img_path.stem}_result.png", dpi=150, bbox_inches="tight")
-        plt.close()
+            bucket = classify_bucket(gt, r.class_name, has_ischemic_gt=args.gt_from_folder)
+            # 파일명 중복 방지 위해 상대경로에서 특수문자 치환
+            stem = img_path.stem.replace(" ", "_").replace("(", "").replace(")", "")
+            out_path = out_dir / bucket / f"{stem}_result.png"
+        else:
+            out_path = out_dir / "unlabeled" / f"{img_path.stem}_result.png"
+        save_3panel(orig, r, out_path, gt or "unknown", dpi=120)
 
     print("\n" + "=" * 70)
     print(f"  총 {len(images)}개 | normal {summary.get('normal', 0)} | "
@@ -140,5 +167,7 @@ if __name__ == "__main__":
     p.add_argument("--seg-ckpt", default="./checkpoints/segmentor/best_segmentor.pth")
     p.add_argument("--no-gt-from-name", action="store_true",
                    help="파일명에서 GT 추측 비활성화")
+    p.add_argument("--gt-from-folder", action="store_true",
+                   help="하위 폴더명(hemorrhagic/ischaemic/normal)을 GT 로 사용 (rglob 스캔)")
     args = p.parse_args()
     main(args)
