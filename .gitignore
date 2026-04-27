@@ -19,6 +19,12 @@ results/**/*.jpg
 results/**/*.jpeg
 !results/.gitkeep
 
+# 이전 버전 결과 (현재 활성 버전만 push). 로컬에는 유지하되 git tracked 안 함.
+results/test_full_v1/
+results/test_full_v2/
+results/test_full_v3/
+results/test_full_v4_brainonly_backup/
+
 .DS_Store
 .vscode/
 .claude/
