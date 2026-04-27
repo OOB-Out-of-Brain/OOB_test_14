@@ -78,7 +78,7 @@ class Combined3ClassDataset(Dataset):
 
     def __getitem__(self, idx):
         source, ref, label = self.samples[idx]
-        if source == "ct" or source == "bhsd":
+        if source in ("ct", "bhsd", "cpaisd"):
             image = np.array(Image.open(ref).convert("RGB"))
         else:  # tekno21
             item = self.hf[ref]
@@ -102,7 +102,12 @@ class Combined3ClassDataset(Dataset):
 
 def _collect_ct(data_root):
     root = Path(data_root)
-    df = pd.read_csv(root / "hemorrhage_diagnosis.csv")
+    csv_path = root / "hemorrhage_diagnosis.csv"
+    if not csv_path.exists():
+        print(f"  ⚠️ CT Hemorrhage 누락 — 학습에서 제외 (PhysioNet 인증 필요한 옵션 데이터). "
+              f"경로 확인: {csv_path}")
+        return []
+    df = pd.read_csv(csv_path)
     df.columns = df.columns.str.strip()
 
     samples = []
@@ -138,6 +143,35 @@ def _collect_bhsd(processed_dir: str = "./data/processed/bhsd"):
     return samples
 
 
+def _collect_cpaisd_cls(processed_dir: str = "./data/processed/cpaisd",
+                        auto_prepare: bool = True):
+    """CPAISD 전처리된 슬라이스를 분류기 학습용 ischemic 샘플(label=1) 로 수집.
+    마스크가 존재한다 = 그 슬라이스가 명백히 허혈. 분류기에 그대로 ischemic 라벨로 투입.
+    auto_prepare=True 면 데이터 없을 때 download+preprocess 자동 호출.
+    반환: [(source, img_path, label, patient_id_int_or_str), ...]"""
+    from data.seg_dataset import _ensure_cpaisd_processed
+    root = Path(processed_dir)
+    idx_csv = root / "index.csv"
+    if not idx_csv.exists() and auto_prepare:
+        if not _ensure_cpaisd_processed(root):
+            return []
+    if not idx_csv.exists():
+        print(f"  ⚠️ CPAISD index 없음: {idx_csv} (preprocess_cpaisd.py 먼저 실행)")
+        return []
+    samples = []
+    import csv as _csv
+    with open(idx_csv) as f:
+        reader = _csv.DictReader(f)
+        for row in reader:
+            img_path = root / row["image_path"]
+            if not img_path.exists():
+                continue
+            study = row.get("study_id", img_path.stem)
+            # 환자 단위 split 위해 study_id 를 patient key 로 사용 (str)
+            samples.append(("cpaisd", img_path, 1, f"cp_{study}"))
+    return samples
+
+
 def _collect_tekno21(cache_dir):
     """tekno21 로드 후 (source, hf_idx, label, -1) 리스트 반환.
     0=Kanama → 2, 1=iskemi → 1, 2=İnme Yok → 0. 제거 없이 전부 포함."""
@@ -159,11 +193,13 @@ def _collect_tekno21(cache_dir):
 def build_combined_dataloaders(ct_root, tekno21_cache, image_size, batch_size,
                                        val_ratio=0.2, seed=42, num_workers=2,
                                        bhsd_processed_dir="./data/processed/bhsd",
-                                       use_ct=True, use_bhsd=True):
+                                       cpaisd_processed_dir="./data/processed/cpaisd",
+                                       use_ct=True, use_bhsd=True, use_cpaisd=True):
     """
     Args:
-        use_ct:   False 이면 CT Hemorrhage 제외 (tekno21만으로 학습할 때 사용)
-        use_bhsd: False 이면 BHSD 제외
+        use_ct:     False 이면 CT Hemorrhage 제외 (tekno21만으로 학습할 때)
+        use_bhsd:   False 이면 BHSD 제외
+        use_cpaisd: False 이면 CPAISD 제외 (기본 True). True 이면 데이터 없으면 자동 다운로드+전처리.
     """
     ct_train, ct_val = [], []
     if use_ct:
@@ -200,8 +236,21 @@ def build_combined_dataloaders(ct_root, tekno21_cache, image_size, batch_size,
             bhsd_train = [(s[0], s[1], s[2]) for s in bhsd_all if s[3] not in bhsd_val_set]
             bhsd_val   = [(s[0], s[1], s[2]) for s in bhsd_all if s[3] in bhsd_val_set]
 
-    train_samples = ct_train + tk_train + bhsd_train
-    val_samples   = ct_val + tk_val + bhsd_val
+    cp_train, cp_val = [], []
+    if use_cpaisd:
+        print("  CPAISD (실제 NCCT 허혈) 로딩...")
+        cp_all = _collect_cpaisd_cls(cpaisd_processed_dir, auto_prepare=True)
+        if cp_all:
+            cp_pids = sorted({s[3] for s in cp_all})
+            rng_c = np.random.RandomState(seed + 2)
+            rng_c.shuffle(cp_pids)
+            n_val_c = max(1, int(len(cp_pids) * val_ratio))
+            cp_val_set = set(cp_pids[:n_val_c])
+            cp_train = [(s[0], s[1], s[2]) for s in cp_all if s[3] not in cp_val_set]
+            cp_val   = [(s[0], s[1], s[2]) for s in cp_all if s[3] in cp_val_set]
+
+    train_samples = ct_train + tk_train + bhsd_train + cp_train
+    val_samples   = ct_val + tk_val + bhsd_val + cp_val
 
     def _dist(ss):
         c = np.bincount([s[2] for s in ss], minlength=NUM_CLASSES)

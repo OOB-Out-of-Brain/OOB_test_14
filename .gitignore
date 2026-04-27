@@ -7,14 +7,15 @@ data/raw/
 data/processed/
 
 # 학습 체크포인트: 학습 돌리면 생성됨 (용량 큼)
-checkpoints/*/*.pth
-checkpoints/*/*.npz
+checkpoints/**/*.pth
+checkpoints/**/*.npz
+
+# 학습 로그 / 추론 결과: 실행 중 생성. 폴더 구조만 유지 (.gitkeep)
+logs/*
+!logs/.gitkeep
+results/*
+!results/.gitkeep
 
 .DS_Store
 .vscode/
 .claude/
-results_4/
-results_5/
-results_5_B_rule_backup/
-logs/
-results/

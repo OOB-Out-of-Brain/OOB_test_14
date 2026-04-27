@@ -5,6 +5,7 @@ data:
   tekno21_cache: ./data/raw/tekno21
   processed_path: ./data/processed
   ct_hemorrhage_path: ./data/raw/ct_hemorrhage/computed-tomography-images-for-intracranial-hemorrhage-detection-and-segmentation-1.0.0
+  cpaisd_processed_dir: ./data/processed/cpaisd  # 실제 NCCT 허혈 (Zenodo 자동 다운로드)
 
 classifier:
   model_name: efficientnet_b2

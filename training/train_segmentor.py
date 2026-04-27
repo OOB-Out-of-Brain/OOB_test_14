@@ -27,6 +27,7 @@ from tqdm import tqdm
 import yaml
 
 from data.seg_dataset import build_seg_dataloaders
+from data.auto_prepare import ensure_training_data
 from models.segmentor import StrokeSegmentor, SEG_CLASS_NAMES, SEG_NUM_CLASSES
 
 
@@ -161,13 +162,27 @@ def main(args):
 
     ct_path = d["ct_hemorrhage_path"]
     aisd_path = d["aisd_path"]
-    print("데이터셋 로딩 (CT Hemorrhage + BHSD + AISD)")
+    cpaisd_processed = d.get("cpaisd_processed_dir", "./data/processed/cpaisd")
+
+    # 학습 진입 전에 누락 데이터셋 일괄 자동 보충
+    ensure_training_data(
+        need_ct_hemorrhage=args.with_ct,
+        need_bhsd=True,
+        need_aisd_synth=args.with_synthetic_aisd,
+        need_cpaisd=not args.no_cpaisd,
+    )
+
+    print("데이터셋 로딩 (CT Hemorrhage + BHSD + AISD synth + CPAISD real + tekno21 pseudo)")
+    print("  ※ 누락 데이터는 위에서 자동 다운로드 시도됨.")
     train_loader, val_loader = build_seg_dataloaders(
         ct_root=ct_path,
         aisd_root=aisd_path,
         bhsd_processed_dir="./data/processed/bhsd",
+        cpaisd_processed_dir=cpaisd_processed,
         image_size=image_size,
         batch_size=batch_size,
+        use_cpaisd=not args.no_cpaisd,
+        use_synthetic_aisd=args.with_synthetic_aisd,
     )
     print(f"학습: {len(train_loader.dataset)}개  검증: {len(val_loader.dataset)}개\n")
 
@@ -241,5 +256,11 @@ if __name__ == "__main__":
                         help="기본: ./checkpoints/segmentor")
     parser.add_argument("--encoder", type=str, default="efficientnet-b0",
                         help="세그 인코더 백본 (기본: efficientnet-b0)")
+    parser.add_argument("--no-cpaisd", action="store_true",
+                        help="CPAISD (실제 NCCT 허혈) 사용 안 함")
+    parser.add_argument("--with-synthetic-aisd", action="store_true",
+                        help="합성 AISD 도 추가 사용 (기본 OFF, CPAISD 가 진짜 데이터)")
+    parser.add_argument("--with-ct", action="store_true",
+                        help="CT Hemorrhage(PhysioNet) 추가 사용 (기본 OFF, 인증 필요)")
     args = parser.parse_args()
     main(args)

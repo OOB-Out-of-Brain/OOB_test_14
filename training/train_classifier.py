@@ -30,6 +30,7 @@ from data.combined_dataset import (
     CLASS_NAMES,
     NUM_CLASSES,
 )
+from data.auto_prepare import ensure_training_data
 from models.classifier import StrokeClassifier
 from training.metrics import accuracy, cls_report, conf_matrix
 
@@ -107,12 +108,26 @@ def main(args):
 
     ct_path = cfg["data"]["ct_hemorrhage_path"]
     tk_cache = cfg["data"]["tekno21_cache"]
-    print("데이터셋 로딩 (3-class: tekno21 + CT Hemorrhage + BHSD)")
+    cpaisd_processed = cfg["data"].get("cpaisd_processed_dir", "./data/processed/cpaisd")
+
+    # 학습 진입 전에 누락 데이터셋 일괄 자동 보충 (BHSD/CPAISD).
+    # tekno21 은 HuggingFace 가 직접 핸들링. CT Hemorrhage 는 옵션 (--with-ct).
+    ensure_training_data(
+        need_ct_hemorrhage=args.with_ct,
+        need_bhsd=not args.tekno21_only,
+        need_aisd_synth=False,  # 분류기는 합성 AISD 사용 안 함
+        need_cpaisd=(not args.tekno21_only) and (not args.no_cpaisd),
+    )
+
+    print("데이터셋 로딩 (3-class: tekno21 + CT Hemorrhage + BHSD + CPAISD ischemic)")
+    print("  ※ 누락 데이터는 위에서 자동 다운로드 시도됨.")
     train_loader, val_loader, class_weights = build_combined_dataloaders(
         ct_root=ct_path, tekno21_cache=tk_cache,
         image_size=image_size, batch_size=batch_size,
-        use_ct=not args.tekno21_only,
+        cpaisd_processed_dir=cpaisd_processed,
+        use_ct=args.with_ct and not args.tekno21_only,
         use_bhsd=not args.tekno21_only,
+        use_cpaisd=(not args.tekno21_only) and (not args.no_cpaisd),
     )
     print(f"학습: {len(train_loader.dataset)}개  검증: {len(val_loader.dataset)}개")
     print(f"class_weights = {class_weights.tolist()}\n")
@@ -179,6 +194,10 @@ if __name__ == "__main__":
     parser.add_argument("--save_path", type=str, default=None,
                         help="기본: ./checkpoints/classifier")
     parser.add_argument("--tekno21-only", action="store_true",
-                        help="CT Hemorrhage / BHSD 제외하고 tekno21만으로 학습")
+                        help="BHSD / CPAISD 제외하고 tekno21만으로 학습")
+    parser.add_argument("--no-cpaisd", action="store_true",
+                        help="CPAISD ischemic 샘플을 학습에서 제외 (기본: 자동 사용)")
+    parser.add_argument("--with-ct", action="store_true",
+                        help="CT Hemorrhage(PhysioNet) 추가 사용 (기본 OFF, 인증 필요)")
     args = parser.parse_args()
     main(args)

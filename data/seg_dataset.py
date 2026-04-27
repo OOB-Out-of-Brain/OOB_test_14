@@ -12,6 +12,8 @@
 
 from pathlib import Path
 import csv
+import subprocess
+import sys
 import numpy as np
 from PIL import Image
 import torch
@@ -77,7 +79,12 @@ class Seg3ClassDataset(Dataset):
 def _collect_ct_hemorrhage(data_root: str):
     import pandas as pd
     root = Path(data_root)
-    df = pd.read_csv(root / "hemorrhage_diagnosis.csv")
+    csv_path = root / "hemorrhage_diagnosis.csv"
+    if not csv_path.exists():
+        print(f"  ⚠️ CT Hemorrhage 누락 — 세그 학습에서 제외 (PhysioNet 인증 옵션). "
+              f"경로 확인: {csv_path}")
+        return []
+    df = pd.read_csv(csv_path)
     df.columns = df.columns.str.strip()
     out = []
     for _, row in df.iterrows():
@@ -122,8 +129,8 @@ def _collect_aisd(aisd_root: str):
     root = Path(aisd_root)
     img_dir = root / "images"
     msk_dir = root / "masks"
-    if not img_dir.exists():
-        print(f"  ⚠️ AISD 없음: {img_dir}")
+    if not img_dir.exists() or not any(img_dir.glob("*.png")):
+        # 합성 AISD 는 옵션 — 없으면 조용히 스킵 (CPAISD 가 진짜 데이터)
         return []
     out = []
     for img in sorted(img_dir.glob("*.png")):
@@ -131,6 +138,49 @@ def _collect_aisd(aisd_root: str):
         if not msk.exists():
             continue
         out.append((img, msk, ISCHEMIC, f"aisd_{img.stem}"))
+    return out
+
+
+def _ensure_cpaisd_processed(processed_dir: Path) -> bool:
+    """CPAISD 가 없으면 preprocess_cpaisd.py 자동 호출 (그 안에서 download 도 자동).
+    이미 있으면 즉시 True. 자동 준비 실패시 False (호출측이 스킵하도록)."""
+    if (processed_dir / "index.csv").exists():
+        return True
+    print(f"  CPAISD 전처리본 없음 → preprocess_cpaisd.py 자동 실행...")
+    repo_root = Path(__file__).resolve().parent.parent
+    script = repo_root / "scripts" / "preprocess_cpaisd.py"
+    if not script.exists():
+        print(f"  ⚠️ {script} 없음 — CPAISD 스킵")
+        return False
+    rc = subprocess.call([sys.executable, str(script)])
+    if rc != 0:
+        print(f"  ⚠️ CPAISD 자동 준비 실패 (rc={rc}) — 이번 학습은 CPAISD 없이 진행")
+        return False
+    return (processed_dir / "index.csv").exists()
+
+
+def _collect_cpaisd(processed_dir: str, auto_prepare: bool = True):
+    """CPAISD 전처리된 슬라이스 index.csv 로드. 모두 ischemic(1).
+    auto_prepare=True 면 데이터 없을 때 download+preprocess 자동 실행.
+    반환: [(img_path, mask_path, ISCHEMIC, patient_id_str), ...]"""
+    root = Path(processed_dir)
+    idx_csv = root / "index.csv"
+    if not idx_csv.exists() and auto_prepare:
+        if not _ensure_cpaisd_processed(root):
+            return []
+    if not idx_csv.exists():
+        print(f"  ⚠️ CPAISD index 없음: {idx_csv} (preprocess_cpaisd.py 먼저 실행)")
+        return []
+    out = []
+    with open(idx_csv) as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            img = root / row["image_path"]
+            msk = root / row["mask_path"]
+            if not (img.exists() and msk.exists()):
+                continue
+            study = row.get("study_id", img.stem)
+            out.append((img, msk, ISCHEMIC, f"cpaisd_{study}"))
     return out
 
 
@@ -173,11 +223,16 @@ def build_seg_dataloaders(ct_root: str, aisd_root: str,
                                   val_ratio: float = 0.2, seed: int = 42,
                                   num_workers: int = 2,
                                   include_ct_normal: bool = True,
-                                  tekno21_pseudo_dir: str = "./data/processed/tekno21_isch_pseudo"):
+                                  tekno21_pseudo_dir: str = "./data/processed/tekno21_isch_pseudo",
+                                  cpaisd_processed_dir: str = "./data/processed/cpaisd",
+                                  use_cpaisd: bool = True,
+                                  use_synthetic_aisd: bool = True):
     """
     Args:
         include_ct_normal: CT Hemorrhage의 정상 슬라이스를 함께 학습 (배경만 있는 pair)
                            False 면 lesion 있는 슬라이스만 사용.
+        use_cpaisd: 실제 NCCT 허혈 데이터 (CPAISD, Zenodo). 없으면 자동 다운로드+전처리.
+        use_synthetic_aisd: 합성 AISD (generate_synthetic_aisd.py 산출). 병행 학습용.
     """
     print("  CT Hemorrhage 세그 로딩...")
     ct_all = _collect_ct_hemorrhage(ct_root)
@@ -187,8 +242,15 @@ def build_seg_dataloaders(ct_root: str, aisd_root: str,
     print("  BHSD 세그 로딩...")
     bhsd_all = _collect_bhsd_seg(bhsd_processed_dir)
 
-    print("  AISD (ischemic, 합성) 세그 로딩...")
-    aisd_all = _collect_aisd(aisd_root)
+    aisd_all = []
+    if use_synthetic_aisd:
+        print("  AISD (ischemic, 합성) 세그 로딩...")
+        aisd_all = _collect_aisd(aisd_root)
+
+    cp_all = []
+    if use_cpaisd:
+        print("  CPAISD (ischemic, 실제 NCCT) 세그 로딩...")
+        cp_all = _collect_cpaisd(cpaisd_processed_dir, auto_prepare=True)
 
     print("  tekno21 pseudo-ischemic (Grad-CAM) 로딩...")
     tkp_all = _collect_tekno21_pseudo(tekno21_pseudo_dir)
@@ -196,10 +258,11 @@ def build_seg_dataloaders(ct_root: str, aisd_root: str,
     ct_tr, ct_va = _patient_split(ct_all, val_ratio, seed)
     bh_tr, bh_va = _patient_split(bhsd_all, val_ratio, seed + 1) if bhsd_all else ([], [])
     ai_tr, ai_va = _patient_split(aisd_all, val_ratio, seed + 2) if aisd_all else ([], [])
+    cp_tr, cp_va = _patient_split(cp_all, val_ratio, seed + 4) if cp_all else ([], [])
     tkp_tr, tkp_va = _patient_split(tkp_all, val_ratio, seed + 3) if tkp_all else ([], [])
 
-    train_samples = ct_tr + bh_tr + ai_tr + tkp_tr
-    val_samples   = ct_va + bh_va + ai_va + tkp_va
+    train_samples = ct_tr + bh_tr + ai_tr + cp_tr + tkp_tr
+    val_samples   = ct_va + bh_va + ai_va + cp_va + tkp_va
 
     def _dist(ss):
         c = np.bincount([s[2] for s in ss], minlength=3)
