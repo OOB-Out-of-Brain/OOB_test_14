@@ -8,9 +8,7 @@ Before:
 
 After (사용자 요청):
   {dataset}/correct/{class}/...png
-  {dataset}/wrong/...png
-  {dataset}/hemorrhagic_to_ischemic/...png
-  {dataset}/ischemic_to_hemorrhagic/...png
+  {dataset}/wrong/{gt}_to_{pred}/...png   (6 confusion buckets)
   {dataset}/metrics.txt   (데이터셋별 confusion + 지표)
 
 상위 metrics.txt / summary.csv 는 그대로 유지.
@@ -28,6 +26,15 @@ SUMMARY_CSV = OUT_ROOT / "summary.csv"
 
 CLASSES = ["normal", "ischemic", "hemorrhagic"]
 DATASETS = ["brain_test", "stroke_test_3class", "external_test_3class"]
+# 모든 (gt, pred) 오분류 조합 — confusion matrix 의 off-diagonal 6칸
+WRONG_BUCKETS = [
+    ("hemorrhagic", "ischemic"),
+    ("ischemic", "hemorrhagic"),
+    ("normal", "hemorrhagic"),
+    ("normal", "ischemic"),
+    ("ischemic", "normal"),
+    ("hemorrhagic", "normal"),
+]
 
 
 def normalize_source(src: str) -> str:
@@ -62,22 +69,24 @@ def reorganize() -> dict:
 
             rows_by_ds.setdefault(ds, []).append(row)
 
-            # 1) correct or wrong 메인 위치 결정
-            #    test_full.py 직후엔 flat (correct/<gt>/, wrong/) 이고
-            #    reorganize_test_results.py 후엔 split (correct/<gt>/<ds>/) 이다.
-            #    둘 다 입력으로 받을 수 있게 처리.
+            # correct → {ds}/correct/{gt}/
+            # wrong   → {ds}/wrong/{gt}_to_{pred}/   (6 confusion buckets)
+            # test_full.py 직후엔 flat (correct/<gt>/, wrong/, hemorrhagic_to_ischemic/, ischemic_to_hemorrhagic/)
             if gt == pred:
                 old_candidates = [
-                    OUT_ROOT / "correct" / gt / fname,            # flat
-                    OUT_ROOT / "correct" / gt / ds / fname,        # split
+                    OUT_ROOT / "correct" / gt / fname,
+                    OUT_ROOT / "correct" / gt / ds / fname,
                 ]
                 new_dir = OUT_ROOT / ds / "correct" / gt
             else:
                 old_candidates = [
-                    OUT_ROOT / "wrong" / fname,                    # flat
-                    OUT_ROOT / "wrong" / ds / fname,               # split
+                    OUT_ROOT / "wrong" / fname,
+                    OUT_ROOT / "wrong" / ds / fname,
+                    # test_full.py 의 강조 복사본도 입력으로 흡수 (출혈↔허혈만)
+                    OUT_ROOT / f"{gt}_to_{pred}" / fname,
+                    OUT_ROOT / f"{gt}_to_{pred}" / ds / fname,
                 ]
-                new_dir = OUT_ROOT / ds / "wrong"
+                new_dir = OUT_ROOT / ds / "wrong" / f"{gt}_to_{pred}"
 
             new_dir.mkdir(parents=True, exist_ok=True)
             new_path = new_dir / fname
@@ -86,28 +95,11 @@ def reorganize() -> dict:
             if old is not None and not new_path.exists():
                 shutil.move(str(old), str(new_path))
 
-            # 2) 강조 폴더 (출혈↔허혈)
-            if gt == "hemorrhagic" and pred == "ischemic":
-                emp_root = OUT_ROOT / "hemorrhagic_to_ischemic"
-                emp_new_dir = OUT_ROOT / ds / "hemorrhagic_to_ischemic"
-            elif gt == "ischemic" and pred == "hemorrhagic":
-                emp_root = OUT_ROOT / "ischemic_to_hemorrhagic"
-                emp_new_dir = OUT_ROOT / ds / "ischemic_to_hemorrhagic"
-            else:
-                emp_root = None
-
-            if emp_root is not None:
-                emp_new_dir.mkdir(parents=True, exist_ok=True)
-                emp_new = emp_new_dir / fname
-                emp_old = next((p for p in (emp_root / fname, emp_root / ds / fname) if p.exists()), None)
-                if emp_old is not None and not emp_new.exists():
-                    shutil.move(str(emp_old), str(emp_new))
-                elif new_path.exists() and not emp_new.exists():
-                    # wrong/ 에서 옮겨진 파일 복사 (강조 표시 유지)
-                    shutil.copyfile(str(new_path), str(emp_new))
-
-    # 빈 옛 카테고리 폴더 제거
-    for old_root in ("correct", "wrong", "hemorrhagic_to_ischemic", "ischemic_to_hemorrhagic"):
+    # 옛 카테고리 폴더 정리.
+    #   correct/, wrong/ : 파일은 모두 옮겨졌으므로 빈 디렉토리만 rmdir.
+    #   강조 폴더 (hem↔isc 등) : test_full.py 가 wrong/ 의 복사본을 따로 떨궈둠.
+    #     이미 {ds}/wrong/{gt}_to_{pred}/ 에 원본이 있으므로 통째로 rmtree.
+    for old_root in ("correct", "wrong"):
         p = OUT_ROOT / old_root
         if p.exists():
             for sub in sorted(p.rglob("*"), key=lambda x: -len(str(x))):
@@ -120,6 +112,13 @@ def reorganize() -> dict:
                 p.rmdir()
             except OSError:
                 pass
+
+    for emp_root in ("hemorrhagic_to_ischemic", "ischemic_to_hemorrhagic",
+                      "normal_to_hemorrhagic", "normal_to_ischemic",
+                      "ischemic_to_normal", "hemorrhagic_to_normal"):
+        p = OUT_ROOT / emp_root
+        if p.exists():
+            shutil.rmtree(p)
 
     return rows_by_ds
 
@@ -172,9 +171,9 @@ def write_dataset_metrics(rows_by_ds: dict):
             # 폴더 카운트
             f.write("[이 데이터셋 폴더 안 결과 개수]\n")
             ds_dir = OUT_ROOT / ds
-            for sub in ["correct/normal", "correct/ischemic", "correct/hemorrhagic",
-                        "wrong",
-                        "hemorrhagic_to_ischemic", "ischemic_to_hemorrhagic"]:
+            subs = ["correct/normal", "correct/ischemic", "correct/hemorrhagic"]
+            subs += [f"wrong/{g}_to_{p}" for g, p in WRONG_BUCKETS]
+            for sub in subs:
                 d = ds_dir / sub
                 cnt = len(list(d.glob("*.png"))) if d.exists() else 0
                 f.write(f"  {sub:<35} {cnt:>6d}\n")
@@ -194,8 +193,9 @@ def main():
         if not d.exists():
             continue
         print(f"  {ds}/")
-        for sub in ["correct/normal", "correct/ischemic", "correct/hemorrhagic",
-                    "wrong", "hemorrhagic_to_ischemic", "ischemic_to_hemorrhagic"]:
+        subs = ["correct/normal", "correct/ischemic", "correct/hemorrhagic"]
+        subs += [f"wrong/{g}_to_{p}" for g, p in WRONG_BUCKETS]
+        for sub in subs:
             p = d / sub
             cnt = len(list(p.glob("*.png"))) if p.exists() else 0
             mark = " " if cnt > 0 else "·"
