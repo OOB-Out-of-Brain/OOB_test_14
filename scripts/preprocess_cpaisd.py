@@ -50,9 +50,20 @@ WINDOW_CENTER = 40
 WINDOW_WIDTH = 80
 
 
+def _has_studies() -> bool:
+    """train/val/test 안에 Study UID 디렉토리가 하나라도 있는가."""
+    if not SRC_ROOT.exists():
+        return False
+    for split in ("train", "val", "test"):
+        d = SRC_ROOT / split
+        if d.exists() and any(p.is_dir() for p in d.iterdir()):
+            return True
+    return False
+
+
 def _ensure_source() -> bool:
     """원본 압축 해제본이 없으면 download_cpaisd.py 자동 실행."""
-    if SRC_ROOT.exists() and any(SRC_ROOT.rglob("Study_*")):
+    if _has_studies():
         return True
     print(f"⚠️ 원본 없음: {SRC_ROOT}")
     print(f"   download_cpaisd.py 자동 실행...\n")
@@ -62,7 +73,7 @@ def _ensure_source() -> bool:
         print(f"\n❌ 다운로드 실패. 위 로그 확인 후 재시도:")
         print(f"   python scripts/download_cpaisd.py")
         return False
-    return SRC_ROOT.exists() and any(SRC_ROOT.rglob("Study_*"))
+    return _has_studies()
 
 
 def _pick_2d_array(npz_path: Path) -> np.ndarray | None:
@@ -144,13 +155,22 @@ def _to_binary_mask(arr: np.ndarray) -> np.ndarray:
 
 
 def _iter_slice_dirs():
-    """split 별로 Study_*/Slice_* 디렉토리 yield."""
-    for split_dir in sorted(SRC_ROOT.iterdir()):
+    """split 별로 <Study UID>/<slice idx> 디렉토리 yield.
+
+    실제 CPAISD 압축 구조:
+        dataset/{train,val,test}/<dicom-study-uid>/<00000..>/{image.npz, mask.npz, ...}
+    Study UID 는 'Study_*' prefix 가 아닌 raw DICOM UID (예: 2.25.151953...).
+    슬라이스 폴더는 'Slice_*' prefix 가 아닌 5자리 zero-padded 번호 (예: 00042).
+    image.npz 가 있는 디렉토리 = 슬라이스 디렉토리로 식별한다.
+    """
+    for split in ("train", "val", "test"):
+        split_dir = SRC_ROOT / split
         if not split_dir.is_dir():
             continue
-        split = split_dir.name  # train/val/test
-        for study_dir in sorted(split_dir.glob("Study_*")):
-            for slice_dir in sorted(study_dir.glob("Slice_*")):
+        for study_dir in sorted(p for p in split_dir.iterdir() if p.is_dir()):
+            for slice_dir in sorted(p for p in study_dir.iterdir() if p.is_dir()):
+                if not (slice_dir / "image.npz").exists():
+                    continue
                 yield split, study_dir.name, slice_dir.name, slice_dir
 
 
@@ -196,9 +216,11 @@ def main() -> int:
                 skipped_empty += 1
                 continue
 
-            study_id = study.replace("Study_", "")
-            slice_id = slc.replace("Slice_", "")
-            stem = f"cp_{study_id}_s{slice_id}"
+            study_id = study  # full DICOM UID
+            slice_id = slc    # 00000~ zero-padded
+            # 파일명: 짧은 hash + slice 번호 (UID 가 너무 길어 OS 한계 초과 우려)
+            short = study_id.split(".")[-1][-12:] if "." in study_id else study_id[-12:]
+            stem = f"cp_{short}_s{slice_id}"
             img_png = OUT_IMG / f"{stem}.png"
             msk_png = OUT_MASK / f"{stem}.png"
             Image.fromarray(img_u8).save(img_png)

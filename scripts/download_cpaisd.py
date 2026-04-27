@@ -113,10 +113,22 @@ def download_with_resume(url: str, dest: Path, chunk: int = 1024 * 256) -> bool:
     return True
 
 
+def _count_studies() -> int:
+    """train/val/test 안의 Study UID 폴더 개수."""
+    if not EXTRACT_DIR.exists():
+        return 0
+    n = 0
+    for split in ("train", "val", "test"):
+        d = EXTRACT_DIR / split
+        if d.exists():
+            n += sum(1 for p in d.iterdir() if p.is_dir())
+    return n
+
+
 def extract(zip_path: Path, out_dir: Path) -> bool:
-    """이미 풀려있으면 스킵 (Study_ 폴더 1개 이상으로 판단)."""
+    """이미 풀려있으면 스킵 (train/val/test 하위 폴더 1개 이상으로 판단)."""
     if EXTRACT_DIR.exists():
-        existing = sum(1 for _ in EXTRACT_DIR.rglob("Study_*"))
+        existing = _count_studies()
         if existing > 0:
             print(f"    ✅ 이미 압축 해제됨 ({existing}개 Study 폴더)")
             return True
@@ -148,9 +160,8 @@ def main() -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # 이미 풀려있으면 곧장 종료
-    if EXTRACT_DIR.exists() and any(EXTRACT_DIR.rglob("Study_*")):
-        n = sum(1 for _ in EXTRACT_DIR.rglob("Study_*"))
-        print(f"\n✅ CPAISD 이미 준비 완료 ({n}개 Study)")
+    if _count_studies() > 0:
+        print(f"\n✅ CPAISD 이미 준비 완료 ({_count_studies()}개 Study)")
         print(f"   다음 단계: python scripts/preprocess_cpaisd.py")
         return 0
 
@@ -165,7 +176,7 @@ def main() -> int:
     if not extract(ZIP_PATH, OUT_DIR):
         return 1
 
-    n = sum(1 for _ in EXTRACT_DIR.rglob("Study_*"))
+    n = _count_studies()
     print(f"\n✅ 완료. Study 폴더 {n}개")
     print(f"   다음 단계: python scripts/preprocess_cpaisd.py")
     return 0
