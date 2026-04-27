@@ -46,8 +46,9 @@ OUT_ROOT = Path("./results/test_full")
 DEFAULT_SOURCES = [
     # (path, gt_from)
     (Path("/Users/bari/Downloads/brain_test"), "filename"),
-    (Path("./data/raw/stroke_test_3class/Brain_Stroke_CT-SCAN_image/Test"), "folder"),
     (Path("./data/raw/external_test_3class"), "folder"),  # Kaggle 3-class 의사 라벨
+    # stroke_test_3class 제외: 환자 단위 라벨이라 슬라이스 단위 분류기 평가에 부적합 (2026-04-28).
+    # (Path("./data/raw/stroke_test_3class/Brain_Stroke_CT-SCAN_image/Test"), "folder"),
 ]
 
 CLASSES = ["normal", "ischemic", "hemorrhagic"]
