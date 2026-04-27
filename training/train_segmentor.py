@@ -163,27 +163,30 @@ def main(args):
     ct_path = d["ct_hemorrhage_path"]
     aisd_path = d["aisd_path"]
     cpaisd_processed = d.get("cpaisd_processed_dir", "./data/processed/cpaisd")
+    aisd_real_processed = d.get("aisd_real_processed_dir", "./data/processed/aisd_real")
 
     # 학습 진입 전에 누락 데이터셋 일괄 자동 보충
     ensure_training_data(
         need_ct_hemorrhage=args.with_ct,
         need_bhsd=True,
         need_aisd_synth=args.with_synthetic_aisd,
-        need_cpaisd=not args.no_cpaisd,
+        need_cpaisd=args.with_cpaisd,
     )
 
-    print("데이터셋 로딩 (CT Hemorrhage + BHSD + AISD synth + CPAISD real + tekno21 pseudo)")
-    print("  ※ 누락 데이터는 위에서 자동 다운로드 시도됨.")
+    print("데이터셋 로딩 (BHSD hem + AISD real isc — DWI 가이드 의사 마스크)")
+    print("  ※ 합성 AISD / CPAISD / pseudo 는 기본 OFF (마스크 정확도 우선)")
     train_loader, val_loader = build_seg_dataloaders(
         ct_root=ct_path,
         aisd_root=aisd_path,
         bhsd_processed_dir="./data/processed/bhsd",
         cpaisd_processed_dir=cpaisd_processed,
+        aisd_real_dir=aisd_real_processed,
         image_size=image_size,
         batch_size=batch_size,
-        use_cpaisd=not args.no_cpaisd,
+        use_aisd_real=not args.no_aisd_real,
+        use_cpaisd=args.with_cpaisd,
         use_synthetic_aisd=args.with_synthetic_aisd,
-        use_tekno21_pseudo=not args.no_pseudo,
+        use_tekno21_pseudo=args.with_pseudo,
     )
     print(f"학습: {len(train_loader.dataset)}개  검증: {len(val_loader.dataset)}개\n")
 
@@ -263,14 +266,16 @@ if __name__ == "__main__":
                         help="기본: ./checkpoints/segmentor")
     parser.add_argument("--encoder", type=str, default="efficientnet-b0",
                         help="세그 인코더 백본 (기본: efficientnet-b0)")
-    parser.add_argument("--no-cpaisd", action="store_true",
-                        help="CPAISD (실제 NCCT 허혈) 사용 안 함")
+    parser.add_argument("--no-aisd-real", action="store_true",
+                        help="AISD real (DWI 가이드 의사 마스크) 사용 안 함 (기본 ON)")
+    parser.add_argument("--with-cpaisd", action="store_true",
+                        help="CPAISD core+penumbra 도 함께 사용 (기본 OFF, 마스크 큰 경향)")
     parser.add_argument("--with-synthetic-aisd", action="store_true",
-                        help="합성 AISD 도 추가 사용 (기본 OFF, CPAISD 가 진짜 데이터)")
+                        help="합성 AISD 도 추가 사용 (기본 OFF)")
     parser.add_argument("--with-ct", action="store_true",
                         help="CT Hemorrhage(PhysioNet) 추가 사용 (기본 OFF, 인증 필요)")
-    parser.add_argument("--no-pseudo", action="store_true",
-                        help="tekno21 Grad-CAM pseudo masks 제외 (mask 정확도 향상 기대)")
+    parser.add_argument("--with-pseudo", action="store_true",
+                        help="tekno21 Grad-CAM pseudo masks 사용 (기본 OFF, 약한 supervision)")
     parser.add_argument("--scheduler", choices=["cosine", "warm_restart"], default="cosine",
                         help="lr 스케줄러 (기본: cosine = restart 없음)")
     parser.add_argument("--patience", type=int, default=None,

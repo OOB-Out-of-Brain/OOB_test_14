@@ -141,6 +141,30 @@ def _collect_aisd(aisd_root: str):
     return out
 
 
+def _collect_aisd_real(processed_dir: str = "./data/processed/aisd_real"):
+    """AISD (GriffinLiang) 진짜 NCCT + 의사 마스크 슬라이스 수집.
+    마스크 라벨 {1,2,3,5} 만 lesion 으로 binary 변환됨 (preprocess_aisd_real.py).
+    환자 단위 split 가능 (patient_id 사용).
+    반환: [(img_path, mask_path, ISCHEMIC, patient_id_str), ...]"""
+    root = Path(processed_dir)
+    idx_csv = root / "index.csv"
+    if not idx_csv.exists():
+        print(f"  ⚠️ AISD real index 없음: {idx_csv}")
+        print(f"     실행: python scripts/preprocess_aisd_real.py")
+        return []
+    out = []
+    with open(idx_csv) as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            img = root / row["image_path"]
+            msk = root / row["mask_path"]
+            if not (img.exists() and msk.exists()):
+                continue
+            pid = row.get("patient_id", img.stem.split("_s")[0])
+            out.append((img, msk, ISCHEMIC, f"aisd_{pid}"))
+    return out
+
+
 def _ensure_cpaisd_processed(processed_dir: Path) -> bool:
     """CPAISD 가 없으면 preprocess_cpaisd.py 자동 호출 (그 안에서 download 도 자동).
     이미 있으면 즉시 True. 자동 준비 실패시 False (호출측이 스킵하도록)."""
@@ -225,17 +249,20 @@ def build_seg_dataloaders(ct_root: str, aisd_root: str,
                                   include_ct_normal: bool = True,
                                   tekno21_pseudo_dir: str = "./data/processed/tekno21_isch_pseudo",
                                   cpaisd_processed_dir: str = "./data/processed/cpaisd",
-                                  use_cpaisd: bool = True,
-                                  use_synthetic_aisd: bool = True,
-                                  use_tekno21_pseudo: bool = True):
+                                  aisd_real_dir: str = "./data/processed/aisd_real",
+                                  use_aisd_real: bool = True,
+                                  use_cpaisd: bool = False,
+                                  use_synthetic_aisd: bool = False,
+                                  use_tekno21_pseudo: bool = False):
     """
     Args:
         include_ct_normal: CT Hemorrhage의 정상 슬라이스를 함께 학습 (배경만 있는 pair)
                            False 면 lesion 있는 슬라이스만 사용.
-        use_cpaisd: 실제 NCCT 허혈 데이터 (CPAISD, Zenodo). 없으면 자동 다운로드+전처리.
-        use_synthetic_aisd: 합성 AISD (generate_synthetic_aisd.py 산출). 병행 학습용.
-        use_tekno21_pseudo: tekno21 Grad-CAM pseudo masks (분류기 attention 기반).
-                            끄면 약한 supervision 노이즈 제거 (마스크 정확도 향상 기대).
+        use_aisd_real: AISD (GriffinLiang) 진짜 NCCT + DWI 가이드 의사 마스크.
+                       이번 학습의 메인 ischemic supervision (기본 ON).
+        use_cpaisd: CPAISD core+penumbra. 마스크가 큰 경향 → 기본 OFF.
+        use_synthetic_aisd: 합성 AISD. 가짜 마스크라 기본 OFF.
+        use_tekno21_pseudo: tekno21 Grad-CAM pseudo masks. 약한 supervision → 기본 OFF.
     """
     print("  CT Hemorrhage 세그 로딩...")
     ct_all = _collect_ct_hemorrhage(ct_root)
@@ -250,6 +277,12 @@ def build_seg_dataloaders(ct_root: str, aisd_root: str,
         print("  AISD (ischemic, 합성) 세그 로딩...")
         aisd_all = _collect_aisd(aisd_root)
 
+    aisd_real_all = []
+    if use_aisd_real:
+        print("  AISD real (GriffinLiang, DWI 가이드 의사 마스크) 세그 로딩...")
+        aisd_real_all = _collect_aisd_real(aisd_real_dir)
+        print(f"    → {len(aisd_real_all)} 슬라이스")
+
     cp_all = []
     if use_cpaisd:
         print("  CPAISD (ischemic, 실제 NCCT) 세그 로딩...")
@@ -263,11 +296,12 @@ def build_seg_dataloaders(ct_root: str, aisd_root: str,
     ct_tr, ct_va = _patient_split(ct_all, val_ratio, seed)
     bh_tr, bh_va = _patient_split(bhsd_all, val_ratio, seed + 1) if bhsd_all else ([], [])
     ai_tr, ai_va = _patient_split(aisd_all, val_ratio, seed + 2) if aisd_all else ([], [])
+    ar_tr, ar_va = _patient_split(aisd_real_all, val_ratio, seed + 5) if aisd_real_all else ([], [])
     cp_tr, cp_va = _patient_split(cp_all, val_ratio, seed + 4) if cp_all else ([], [])
     tkp_tr, tkp_va = _patient_split(tkp_all, val_ratio, seed + 3) if tkp_all else ([], [])
 
-    train_samples = ct_tr + bh_tr + ai_tr + cp_tr + tkp_tr
-    val_samples   = ct_va + bh_va + ai_va + cp_va + tkp_va
+    train_samples = ct_tr + bh_tr + ai_tr + ar_tr + cp_tr + tkp_tr
+    val_samples   = ct_va + bh_va + ai_va + ar_va + cp_va + tkp_va
 
     def _dist(ss):
         c = np.bincount([s[2] for s in ss], minlength=3)
