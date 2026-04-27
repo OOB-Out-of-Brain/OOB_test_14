@@ -131,13 +131,20 @@ def _to_uint8_image(arr: np.ndarray) -> np.ndarray:
 
 def _to_binary_mask(arr: np.ndarray) -> np.ndarray:
     """core/penumbra 마스크를 단일 binary (H, W) uint8 (0/1) 로 변환.
-    여러 인코딩 자동 처리:
-      - (H, W) class indices (0=bg, 1=core, 2=penumbra)
-      - (H, W) binary (0/1 또는 0/255)
-      - (2, H, W) / (H, W, 2): core, penumbra 채널 분리
+
+    CPAISD class 정의 (확인됨):
+        0 = background
+        1 = core (실제 경색 — 임상적 lesion 위치)
+        2 = penumbra (위험 영역, 덜 정확)
+
+    이전엔 core+penumbra OR 했으나 mask 가 너무 커지는 부작용 → core 만 사용.
     """
     arr = np.asarray(arr).squeeze()
     if arr.ndim == 2:
+        # CPAISD class indices (값이 {0,1,2} 범위) 면 core(1) 만 사용
+        if arr.dtype in (np.uint8, np.int8, np.int16, np.int32, np.int64) and arr.max() <= 2:
+            return (arr == 1).astype(np.uint8)
+        # 그 외 (binary 0/1 또는 0/255) — 임의 lesion 으로 처리
         return (arr > 0).astype(np.uint8)
     if arr.ndim == 3:
         # 채널 축 추정

@@ -22,7 +22,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, CosineAnnealingLR
 from tqdm import tqdm
 import yaml
 
@@ -183,6 +183,7 @@ def main(args):
         batch_size=batch_size,
         use_cpaisd=not args.no_cpaisd,
         use_synthetic_aisd=args.with_synthetic_aisd,
+        use_tekno21_pseudo=not args.no_pseudo,
     )
     print(f"학습: {len(train_loader.dataset)}개  검증: {len(val_loader.dataset)}개\n")
 
@@ -199,11 +200,17 @@ def main(args):
         ignore_bg_in_dice=True,     # background 때문에 Dice 쏠림 방지
     )
     optimizer = AdamW(model.parameters(), lr=lr, weight_decay=s["weight_decay"])
-    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
+    if args.scheduler == "cosine":
+        scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr * 0.01)
+        print("  scheduler: CosineAnnealingLR (no restart)")
+    else:
+        scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
+        print("  scheduler: CosineAnnealingWarmRestarts (T_0=10, T_mult=2)")
 
     best_score = 0.0
     patience_counter = 0
-    patience = s["early_stopping_patience"]
+    patience = args.patience or s["early_stopping_patience"]
+    print(f"  early stopping patience: {patience}")
 
     def _fmt(dices):
         return "  ".join(f"{n}={v:.3f}" for n, v in zip(SEG_CLASS_NAMES, dices))
@@ -262,5 +269,11 @@ if __name__ == "__main__":
                         help="합성 AISD 도 추가 사용 (기본 OFF, CPAISD 가 진짜 데이터)")
     parser.add_argument("--with-ct", action="store_true",
                         help="CT Hemorrhage(PhysioNet) 추가 사용 (기본 OFF, 인증 필요)")
+    parser.add_argument("--no-pseudo", action="store_true",
+                        help="tekno21 Grad-CAM pseudo masks 제외 (mask 정확도 향상 기대)")
+    parser.add_argument("--scheduler", choices=["cosine", "warm_restart"], default="cosine",
+                        help="lr 스케줄러 (기본: cosine = restart 없음)")
+    parser.add_argument("--patience", type=int, default=None,
+                        help="early stopping patience (기본: config.yaml 값)")
     args = parser.parse_args()
     main(args)

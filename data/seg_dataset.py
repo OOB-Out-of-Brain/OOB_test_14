@@ -226,13 +226,16 @@ def build_seg_dataloaders(ct_root: str, aisd_root: str,
                                   tekno21_pseudo_dir: str = "./data/processed/tekno21_isch_pseudo",
                                   cpaisd_processed_dir: str = "./data/processed/cpaisd",
                                   use_cpaisd: bool = True,
-                                  use_synthetic_aisd: bool = True):
+                                  use_synthetic_aisd: bool = True,
+                                  use_tekno21_pseudo: bool = True):
     """
     Args:
         include_ct_normal: CT Hemorrhage의 정상 슬라이스를 함께 학습 (배경만 있는 pair)
                            False 면 lesion 있는 슬라이스만 사용.
         use_cpaisd: 실제 NCCT 허혈 데이터 (CPAISD, Zenodo). 없으면 자동 다운로드+전처리.
         use_synthetic_aisd: 합성 AISD (generate_synthetic_aisd.py 산출). 병행 학습용.
+        use_tekno21_pseudo: tekno21 Grad-CAM pseudo masks (분류기 attention 기반).
+                            끄면 약한 supervision 노이즈 제거 (마스크 정확도 향상 기대).
     """
     print("  CT Hemorrhage 세그 로딩...")
     ct_all = _collect_ct_hemorrhage(ct_root)
@@ -252,8 +255,10 @@ def build_seg_dataloaders(ct_root: str, aisd_root: str,
         print("  CPAISD (ischemic, 실제 NCCT) 세그 로딩...")
         cp_all = _collect_cpaisd(cpaisd_processed_dir, auto_prepare=True)
 
-    print("  tekno21 pseudo-ischemic (Grad-CAM) 로딩...")
-    tkp_all = _collect_tekno21_pseudo(tekno21_pseudo_dir)
+    tkp_all = []
+    if use_tekno21_pseudo:
+        print("  tekno21 pseudo-ischemic (Grad-CAM) 로딩...")
+        tkp_all = _collect_tekno21_pseudo(tekno21_pseudo_dir)
 
     ct_tr, ct_va = _patient_split(ct_all, val_ratio, seed)
     bh_tr, bh_va = _patient_split(bhsd_all, val_ratio, seed + 1) if bhsd_all else ([], [])
