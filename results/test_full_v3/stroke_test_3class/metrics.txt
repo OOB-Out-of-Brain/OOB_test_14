@@ -1,0 +1,26 @@
+데이터셋: stroke_test_3class
+============================================================
+
+전체 샘플 : 437
+정확도    : 0.0847 (8.47%)
+오류율    : 0.9153 (91.53%)
+
+[Confusion matrix] (행=GT, 열=Pred)
+                     normal      ischemic   hemorrhagic
+       normal              0             0             0
+     ischemic            260             2            45
+  hemorrhagic             92             3            35
+
+[Per-class 지표]
+  class          precision     recall         F1  support
+  normal              (없음)       (없음)       (없음)        0
+  ischemic          0.4000     0.0065     0.0128      307
+  hemorrhagic       0.4375     0.2692     0.3333      130
+
+[이 데이터셋 폴더 안 결과 개수]
+  correct/normal                           0
+  correct/ischemic                         2
+  correct/hemorrhagic                     35
+  wrong                                  400
+  hemorrhagic_to_ischemic                  3
+  ischemic_to_hemorrhagic                 45

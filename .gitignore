@@ -6,14 +6,17 @@ __pycache__/
 data/raw/
 data/processed/
 
-# 학습 체크포인트: 학습 돌리면 생성됨 (용량 큼)
-checkpoints/**/*.pth
-checkpoints/**/*.npz
+# 학습 체크포인트는 LFS 또는 직접 push (각 25-100MB)
+# .gitignore 에서 풀고 git add -f 로 명시적으로 포함
 
-# 학습 로그 / 추론 결과: 실행 중 생성. 폴더 구조만 유지 (.gitkeep)
+# 학습 로그: 실행 중 생성
 logs/*
 !logs/.gitkeep
-results/*
+
+# 추론 결과: PNG 들은 너무 커서 제외, metrics.txt 와 summary.csv 만 포함
+results/**/*.png
+results/**/*.jpg
+results/**/*.jpeg
 !results/.gitkeep
 
 .DS_Store

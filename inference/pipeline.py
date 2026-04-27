@@ -160,7 +160,9 @@ class StrokePipeline:
         # 세그 (있을 때만)
         if self.segmentor is not None:
             seg_tensor = self.seg_transform(image=orig_np)["image"].unsqueeze(0).to(self.device)
-            cls_map = self.segmentor.predict_mask(seg_tensor)[0].cpu().numpy().astype(np.int64)
+            # softmax probs 도 뽑아둠 (강제 그리기 fallback 용)
+            seg_probs = self.segmentor.predict_prob(seg_tensor)[0].cpu().numpy()  # (3, H', W')
+            cls_map = seg_probs.argmax(axis=0).astype(np.int64)                   # (H', W')
             cls_map_full = self._resize_class_map(cls_map, h, w)
 
             # 세그 결과를 뇌 영역 내로 제한 (배경·두개골 위의 잘못된 예측 제거)
@@ -169,6 +171,16 @@ class StrokePipeline:
 
             isc_bin = (cls_map_full == 1).astype(np.float32)
             hem_bin = (cls_map_full == 2).astype(np.float32)
+
+            # ── 강제 마스크 fallback ──
+            # 분류기가 lesion(ischemic/hemorrhagic) 으로 판정했는데
+            # 세그 argmax 가 아무 픽셀도 안 그렸으면 prob top-N% 로 강제 표시.
+            # 정상 슬라이스에 false positive 방지를 위해 분류 결과가 lesion 일 때만 적용.
+            FORCE_TOP_PCT = 0.03  # 뇌 영역의 상위 3% 픽셀
+            if pred_idx == 1 and isc_bin.sum() == 0:
+                isc_bin = self._force_mask_from_prob(seg_probs[1], h, w, brain_mask, FORCE_TOP_PCT)
+            elif pred_idx == 2 and hem_bin.sum() == 0:
+                hem_bin = self._force_mask_from_prob(seg_probs[2], h, w, brain_mask, FORCE_TOP_PCT)
 
             result.lesion_class_map = cls_map_full
             if isc_bin.sum() > 0:
@@ -199,6 +211,27 @@ class StrokePipeline:
         import cv2
         return cv2.resize(cls_map.astype(np.uint8), (w, h),
                           interpolation=cv2.INTER_NEAREST).astype(np.int64)
+
+    @staticmethod
+    def _force_mask_from_prob(prob_small: np.ndarray, h: int, w: int,
+                              brain_mask: np.ndarray, top_pct: float) -> np.ndarray:
+        """세그 softmax channel(prob_small) 의 top top_pct 픽셀을 mask 로 강제 표시.
+        뇌 영역 안에서만 quantile 계산. brain_mask 있으면 그 영역으로 제한."""
+        import cv2
+        prob_full = cv2.resize(prob_small.astype(np.float32), (w, h),
+                               interpolation=cv2.INTER_LINEAR)
+        if brain_mask.sum() > 0:
+            inside = prob_full[brain_mask > 0]
+            if inside.size == 0 or inside.max() <= 0:
+                return np.zeros((h, w), dtype=np.float32)
+            thr = np.quantile(inside, 1.0 - top_pct)
+            mask = ((prob_full > thr) & (brain_mask > 0)).astype(np.float32)
+        else:
+            if prob_full.max() <= 0:
+                return np.zeros((h, w), dtype=np.float32)
+            thr = np.quantile(prob_full, 1.0 - top_pct)
+            mask = (prob_full > thr).astype(np.float32)
+        return mask
 
     @staticmethod
     def _overlay(orig: np.ndarray, r: PipelineResult,

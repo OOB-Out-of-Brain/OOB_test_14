@@ -33,7 +33,7 @@ CLASS_ALIASES = {
     "ischemia": "ischemic", "ischaemia": "ischemic", "isch": "ischemic",
     "hemorrhagic": "hemorrhagic", "haemorrhagic": "hemorrhagic",
     "hemorrhage": "hemorrhagic", "haemorrhage": "hemorrhagic",
-    "kanama": "hemorrhagic", "bleed": "hemorrhagic",
+    "kanama": "hemorrhagic", "bleed": "hemorrhagic", "bleeding": "hemorrhagic",
 }
 
 

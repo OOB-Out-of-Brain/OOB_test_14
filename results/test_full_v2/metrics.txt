@@ -1,0 +1,47 @@
+통합 외부 테스트 평가 (학습 미사용 hold-out)
+======================================================================
+
+전체 샘플 수 : 8229
+전체 정확도  : 0.9480 (94.80%)
+오류율       : 0.0520 (5.20%)
+
+[데이터 소스별 분포]
+  source                                normal   ischemic   hemorrhagic       합계
+  brain_test                                 2          0            10       12
+  Test/hemorrhagic                           0          0           130      130
+  Test/ischaemic                             0        307             0      307
+  external_test_3class/hemorrhagic           0          0          1093     1093
+  external_test_3class/ischemic              0       2260             0     2260
+  external_test_3class/normal             4427          0             0     4427
+
+[Confusion matrix] (행=GT, 열=Pred)
+                     normal      ischemic   hemorrhagic
+       normal           4420             3             6
+     ischemic            275          2246            46
+  hemorrhagic             93             5          1135
+
+[Per-class 지표]
+  class          precision     recall         F1     TP     FP     FN  support
+  normal            0.9231     0.9980     0.9591   4420    368      9     4429
+  ischemic          0.9965     0.8750     0.9318   2246      8    321     2567
+  hemorrhagic       0.9562     0.9205     0.9380   1135     52     98     1233
+
+[오류 유형별 (오탐/누락) 율]
+  유형                                           개수      GT 대비
+  정상→허혈로 오탐 (False Positive ischemic)           3      0.07%
+  정상→출혈로 오탐 (False Positive hem)                6      0.14%
+  허혈→정상으로 놓침 (False Negative ischemic)        275     10.71%
+  허혈→출혈로 혼동                                    46      1.79%
+  출혈→정상으로 놓침 (False Negative hem)              93      7.54%
+  출혈→허혈로 혼동                                     5      0.41%
+
+[버킷별 시각화 폴더 카운트]
+  correct/hemorrhagic                        1135
+  correct/ischemic                           2246
+  correct/normal                             4420
+  wrong/hemorrhagic_to_ischemic                 5
+  wrong/hemorrhagic_to_normal                  93
+  wrong/ischemic_to_hemorrhagic                46
+  wrong/ischemic_to_normal                    275
+  wrong/normal_to_hemorrhagic                   6
+  wrong/normal_to_ischemic                      3
